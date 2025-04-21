@@ -1,0 +1,258 @@
+```{r}
+library(EnrichedHeatmap)
+library(rtracklayer)
+library(tidyverse)
+library(circlize)
+```
+
+### Plot metaplots of ChIP-seq tracks for RCMC/Micro-C boundaries
+
+```{r}
+# read bigwig files of specific epigenomic tracks - path should be changed
+get_epi_bw_files = function(celltype, epi){
+    
+    epi |>
+        set_names(epi) |>
+        map(~import(paste0('/mnt/md0/fanfeng/Data/Epi_bigwig/', celltype, '/', celltype, '_', .x, '_hg38.bigWig')))
+}
+```
+
+```{r}
+all_GM12878_bw = get_epi_bw_files('GM12878', c('CTCF', 'POLR2A', 'H3K27ac'))
+all_K562_bw = get_epi_bw_files('K562', c('CTCF', 'POLR2A', 'H3K27ac'))
+all_H1_bw = get_epi_bw_files('H1', c('CTCF', 'POLR2A', 'H3K27ac'))
+all_HCT116_bw = get_epi_bw_files('HCT-116', c('CTCF', 'POLR2A', 'H3K27ac'))
+```
+
+```{r}
+# read boundaries from call_insulation_domains.py
+rcmc_boundaries = fs::dir_ls(path = './rcmc_boundaries_filtered/', glob = '*.bed') |>
+    as.character() |>
+    purrr::set_names(function(x) {
+    str_sub(fs::path_file(x), end = - str_length('_boundaries_20kb.bed') - 1)
+    }) |>
+    map(~ read_tsv(.x, show_col_types = FALSE)) |>
+    map(~ makeGRangesFromDataFrame(.x, keep.extra.columns = TRUE))
+```
+
+```{r}
+rcmc_regions = read_tsv('/mnt/md0/clarice/src/region_idx.txt') |>
+    makeGRangesFromDataFrame(keep.extra.columns = TRUE)
+```
+```{r}
+# filter Micro-C boundaries for within RCMC regions only
+microc_boundaries = fs::dir_ls(path = './microc_boundaries_filtered/', glob = '*.bed') |>
+    as.character() |>
+    purrr::set_names(function(x) {
+    str_sub(fs::path_file(x), end = - str_length('_boundaries_20kb.bed') - 1)
+    }) |>
+    map(~ read_tsv(.x, show_col_types = FALSE)) |>
+    map(~ mutate(.x, name = paste(chrom, start, end, sep = '_'))) |>
+    map(~ column_to_rownames(.x, 'name')) |>
+    map(~ makeGRangesFromDataFrame(.x, keep.extra.columns = TRUE)) |>
+    map(~ subsetByOverlaps(.x, rcmc_regions))
+```
+
+### Combine Micro-C and RCMC
+
+```{r}
+combine_microc_rcmc_boundaries = function(microc_boundaries, rcmc_boundaries, minoverlap){
+   RCMC_micro_boundaries = subsetByOverlaps(microc_boundaries, rcmc_boundaries, minoverlap = minoverlap) |>
+        as_tibble() |>
+        mutate(overlap = 'overlap')
+   
+    microc_unique_boundaries = anti_join(as_tibble(microc_boundaries), RCMC_micro_boundaries,
+                                         by = c('seqnames', 'start', 'end')) |>
+        mutate(overlap = 'microc_unique')
+
+    rcmc_unique_boundaries = anti_join(as_tibble(rcmc_boundaries), RCMC_micro_boundaries,
+                                       by = c('seqnames', 'start', 'end')) |>
+        mutate(overlap = 'rcmc_unique')
+
+    all_boundaries = bind_rows(RCMC_micro_boundaries, microc_unique_boundaries, rcmc_unique_boundaries)
+        
+    gr = makeGRangesFromDataFrame(all_boundaries, keep.extra.columns = TRUE)
+
+    split = all_boundaries |>
+        mutate(name = paste(seqnames, start, end, sep = '_')) |>
+        select(name, overlap) |>
+        column_to_rownames('name')
+
+    list('gr' = gr, 'split' = split)
+}
+```
+
+```{r}
+GM12878_combined = combine_microc_rcmc_boundaries(microc_boundaries$GM12878, rcmc_boundaries$GM12878, 150)
+HCT116_combined = combine_microc_rcmc_boundaries(microc_boundaries$HCT116, rcmc_boundaries$HCT116, 150)
+H1_combined = combine_microc_rcmc_boundaries(microc_boundaries$H1, rcmc_boundaries$H1, 150)
+K562_combined = combine_microc_rcmc_boundaries(microc_boundaries$K562, rcmc_boundaries$K562, 150)
+```
+
+```{r}
+GM12878_combined_matrices = all_GM12878_bw[c('CTCF', 'POLR2A', 'H3K27ac')] |>
+    map(~normalizeToMatrix(.x, 
+                        GM12878_combined$gr, 
+                        value_column = 'score', 
+                        extend = 1000, 
+                        mean_mode = 'w0'))
+
+HCT116_combined_matrices = all_HCT116_bw[c('CTCF', 'POLR2A', 'H3K27ac')] |>
+    map(~normalizeToMatrix(.x, 
+                        HCT116_combined$gr, 
+                        value_column = 'score', 
+                        extend = 1000, 
+                        mean_mode = 'w0'))
+
+H1_combined_matrices = all_H1_bw[c('CTCF', 'POLR2A', 'H3K27ac')] |>
+    map(~normalizeToMatrix(.x, 
+                        H1_combined$gr, 
+                        value_column = 'score', 
+                        extend = 1000, 
+                        mean_mode = 'w0'))
+
+K562_combined_matrices = all_K562_bw[c('CTCF', 'POLR2A', 'H3K27ac')] |>
+    map(~normalizeToMatrix(.x, 
+                        K562_combined$gr, 
+                        value_column = 'score', 
+                        extend = 1000, 
+                        mean_mode = 'w0'))
+```
+
+```{r}
+plot_combined_enriched_hm_split = function(mat, name, split, colour){
+
+    max_val = 0.9*max(mat)
+
+    EnrichedHeatmap(mat, 
+                    name = name, 
+                    col = colorRamp2(c(0, max_val), c('#f0f0de', '#3d260f')),
+                    column_title = name,
+                    axis_name = c('-1kb', '', '', '+1kb'),
+                    split = split,
+                    top_annotation = HeatmapAnnotation(lines = anno_enriched(gp = gpar(col = c('#CEB38C', '#8B481F', '#E49029')),
+                                                                            pos_line_gp = gpar(col = 'darkgray',
+                                                                                                lty = 3),
+                                                                            axis = FALSE))
+    )
+}
+```
+
+```{r}
+GM12878_ht = c('CTCF', 'POLR2A', 'H3K27ac') |>
+    map(~ plot_combined_enriched_hm_split(GM12878_combined_matrices[[.x]], .x, GM12878_combined$split$overlap, '#23344d')) |>
+    reduce(`+`)
+
+HCT116_ht = c('CTCF', 'POLR2A', 'H3K27ac') |>
+    map(~ plot_combined_enriched_hm_split(HCT116_combined_matrices[[.x]], .x, HCT116_combined$split$overlap, '#136F63')) |>
+    reduce(`+`)
+
+K562_ht = c('CTCF', 'POLR2A', 'H3K27ac') |>
+    map(~ plot_combined_enriched_hm_split(K562_combined_matrices[[.x]], .x,  K562_combined$split$overlap, '#c64191')) |>
+    reduce(`+`)
+
+H1_ht = c('CTCF', 'POLR2A', 'H3K27ac') |>
+    map(~ plot_combined_enriched_hm_split(H1_combined_matrices[[.x]], .x, split = H1_combined$split$overlap, '#dd8c22')) |>
+    reduce(`+`)
+
+ht_list = c(GM12878_ht, HCT116_ht, K562_ht, H1_ht) |>
+    map(~ draw(.x))
+```
+```{r}
+# code modified from EnrichedHeatmap package
+extract_anno_enriched_modified = function(ht_list, which = NULL, newpage = TRUE, padding = NULL, column_title = NULL) {
+
+    if(!any(sapply(ht_list@ht_list, EnrichedHeatmap:::is_enriched_heatmap))) {
+        stop_wrap("`ht_list` should contain at least one enriched heatmap.")
+    }
+
+    if(!ht_list@layout$initialized) {
+        stop_wrap("`ht_list` should be returned by `draw()` function.")
+    }
+
+    if(newpage) grid.newpage()
+    if(is.null(which)) which = which(sapply(ht_list@ht_list, EnrichedHeatmap:::is_enriched_heatmap))[1]
+    object = ht_list@ht_list[[which]]
+    if(!EnrichedHeatmap:::is_enriched_heatmap(object)) {
+        stop_wrap(paste0("heamtap ", which, " is not an enriched heatmap."))
+    }
+
+    # column_title = column_title
+    if(length(column_title) == 0) column_title = object@name
+    title_height = 2*grobHeight(textGrob(column_title))
+    axis_height = object@heatmap_param$axis_height
+    
+    ha = ht_list@ht_list[[which]]@top_annotation
+    anno = ha@anno_list[[1]]@fun
+    anno@height = unit(1, "npc")
+    left_ext = anno@extended[2]
+    right_ext = anno@extended[4]
+
+    if(is.null(padding)) padding = unit.c(left_ext, right_ext) + unit(2, "mm")
+    
+    # viewprot for title
+    pushViewport(viewport(y = 1, x = padding[1], 
+        height = title_height, 
+        width = unit(1, "npc") - padding[1] - padding[2], just = c("left", "top")))
+    grid.text(column_title)
+    upViewport()
+
+    # viewport the enriched lines
+    pushViewport(viewport(y = axis_height, x = padding[1], 
+        height = unit(1, "npc") - axis_height - title_height, 
+        width = unit(1, "npc") - padding[1] - padding[2], 
+        just = c("left", "bottom")))
+    # x = calc_minor_ticks(object@matrix)
+    # if(length(x)) {
+    #     grid.segments(x, 0, x, 1, gp = gpar(col = "#CCCCCC", lty = 2))
+    # }
+    
+    f1 = function() draw(anno, seq_len(ncol(object@matrix)))
+    f2 = function() f1()
+    f3 = function() f2()
+    f4 = function() f3()
+    f5 = function() f4()
+    f6 = function() f5()
+    f7 = function() f6()
+    f7()
+
+    object@heatmap_param$axis_fun()
+    upViewport()
+}
+```
+
+```{r}
+add_anno_enriched = function(ht_list, name, ri, ci, column_title) {
+    pushViewport(viewport(layout.pos.row = ri, layout.pos.col = ci))
+    extract_anno_enriched_modified(ht_list, name, newpage = FALSE, column_title = column_title)
+    upViewport()
+}
+```
+
+```{r}
+pdf('figures/microc_rcmc_combined_boundaries_CTCF_POLR2A_H3K27ac.pdf', width = 6.5, height = 6)
+
+celltypes = c('GM12878', 'HCT116', 'K562', 'H1')
+
+pushViewport(viewport(layout = grid.layout(nr = 3, nc = 4)))
+
+for (i in seq_along(ht_list)){
+    ht = ht_list[[i]]
+    for (j in seq_along(ht)){
+        add_anno_enriched(ht, j, j, i, celltypes[[i]])
+    }
+}
+
+upViewport()
+dev.off()
+```
+
+```{r}
+lgd = Legend(at = c("Micro-C unique", "shared", "RCMC unique"), type = "lines", legend_gp = gpar(lty = c("1242", "91", "22"), col = 'black'))
+
+pdf('figures/microc_rcmc_combined_lgd.pdf', width = 2, height = 2)
+
+draw(lgd)
+
+dev.off()
+```

@@ -1,0 +1,276 @@
+import pandas as pd
+
+sample_map_df = pd.read_csv("fastq_sample_map.csv")
+sample_map_df.set_index("sample_id", inplace = True)
+
+def find_fastqs(wildcards):
+    sample_id = f"{wildcards.sample}_{wildcards.rep}_{wildcards.lane}"
+    return {
+        "fastq_r1": sample_map_df.at[sample_id, "fastq_r1"],
+        "fastq_r2": sample_map_df.at[sample_id, "fastq_r2"],
+    }
+
+# insert path to working folder
+base_path=""
+
+# Align fastq files and directly pipe to generating pairs files, does not keep the intermediate .bam files
+rule bwa_align:
+    output: 
+        pairs=base_path + "panel2_aligned_files/{sample}_{rep}_{lane}.pairs.gz",
+        stats=base_path + "panel2_aligned_files/{sample}_{rep}_{lane}.stats.txt"
+    input:
+        unpack(find_fastqs),
+        # change path to genome fasta
+        genome="/home/gridsan/chong/genomes/hg38_analysis_set/hg38.analysisSet.fa.gz",
+        # change path of chrom.sizes file
+        chromsizes="/home/gridsan/chong/genomes/hg38/hg38.sorted.chrom.sizes"
+    conda:
+        # change path to conda environment for alignments and processing
+        "rcmc_new.yml"
+    params: 
+        assembly="hg38"
+    resources:
+        cpus_per_task=8
+    threads: 8
+    shell:
+        "bwa-mem2 mem -t {threads} -SP {input.genome} {input.fastq_r1} {input.fastq_r2} "
+        "| pairtools parse2 --add-columns mapq -c {input.chromsizes} --expand --report-position outer --drop-sam "
+        "--assembly {params.assembly} --min-mapq 30 --max-insert-size 150 --output-stats {output.stats} "
+        "--nproc-in {threads} -o {output.pairs}"
+
+# Filter files for captured regions (in RCMC)
+# Generates one file per lane per region
+rule filter_files:
+    output:
+        filtered_pairs=[
+            temp(base_path + f"filtered_files/{{sample}}_{{rep}}_{{lane}}_loc{loc}.pairs") 
+            for loc in range(1, 15)
+        ]
+    input:
+        pairs=rules.bwa_align.output.pairs,
+        # change path to file containing capture regions
+        locations="capture_lookup_v1and2.txt"
+    conda:
+        "rcmc_new.yml"
+    shell:
+        "python3 /home/gridsan/chong/scratch/hansen_lab_lincoln/src/filter_reads_merged.py -o /home/gridsan/chong/hansen_lab_shared/clarice/filtered_files/ "
+        "{input.pairs} {input.locations}"
+
+# Sort the region-specific pairs files
+rule sort_filtered_files:
+    output:
+        sorted_pairs=base_path + "filtered_files/{sample}_{rep}_{lane}_loc{loc}.sorted.pairs"
+    input:
+        filtered_files=base_path + "filtered_files/{sample}_{rep}_{lane}_loc{loc}.pairs"
+    conda:
+        "rcmc_new.yml"
+    threads: 8
+    shell:
+        "pairtools sort --tmpdir $TMPDIR --nproc {threads} -o "
+        "{output.sorted_pairs} {input.filtered_files}"
+
+def find_filtered_files(wildcards):
+    all_lanes = list(sample_map_df[
+        (sample_map_df["sample"] == wildcards.sample) &
+        (sample_map_df["rep"] == wildcards.rep)
+    ]['lane'])
+    return expand(
+        rules.sort_filtered_files.output.sorted_pairs,
+        sample=wildcards.sample, 
+        rep=wildcards.rep, 
+        loc=wildcards.loc, 
+        lane=all_lanes
+    )
+
+# Merge lanes together first, makes it easier to get statistics on each region
+# Also output the statistics to see read information per region per sample
+rule merge_per_rep_loc:
+    output:
+        merged=temp(base_path + "merged_per_rep_loc/{sample}_{rep}_loc{loc}_merged.nodups.pairs.gz"),
+        stats=base_path + "merged_per_rep_loc/{sample}_{rep}_loc{loc}_merged.dedup.stats.txt"
+    input:
+        sorted_filtered_files=find_filtered_files
+    conda:
+        "rcmc_new.yml"
+    threads: 8
+    resources:
+        mem_mb=160000
+    shell:
+        "pairtools merge --tmpdir $TMPDIR --nproc {threads} "
+         "--memory {resources.mem_mb}M "
+         "{input.sorted_filtered_files} "
+         "| pairtools dedup -p {threads} --max-mismatch 1 "
+         "--mark-dups --output {output.merged} "
+         "--output-stats {output.stats}"
+    
+def find_files_for_rep_merge(wildcards):
+    
+    return [rules.merge_per_rep_loc.output.merged.format(
+        sample=wildcards.sample, 
+        rep=wildcards.rep, 
+        loc=loc
+    ) for loc in range(1,15)]
+
+# Merge all files per replicate
+rule merge_per_rep:
+    output:
+        merged=base_path + "merged_per_rep/{sample}_{rep}_merged.nodups.pairs.gz"
+    input:
+        lane_merged_files=find_files_for_rep_merge
+    conda:
+        "rcmc_new.yml"
+    threads: 8
+    resources:
+        mem_mb=160000
+    shell:
+        "pairtools merge --tmpdir $TMPDIR --nproc {threads} "
+         "--memory {resources.mem_mb}M "
+         "--output {output.merged} "
+         "{input.lane_merged_files} "
+
+# Merge all files for the same celltype
+rule merge_per_sample:
+    output:
+        merged="full_merged_files/{sample}_all.nodups.pairs.gz"
+    input:
+        loc_merged_files=[
+            base_path + f"merged_per_loc/{{sample}}_loc{loc}_merged.nodups.pairs.gz" 
+            for loc in range(1, 15)
+        ]
+    conda:
+        "rcmc_new.yml"
+    threads: 8
+    resources:
+        mem_mb=160000
+    shell:
+        "pairtools merge --tmpdir $TMPDIR --nproc {threads} "
+        "--memory {resources.mem_mb}M "
+        "--output {output.merged} "
+        "{input.loc_merged_files}"
+
+# Generate index file for cooler cload
+rule pairix_indexing:
+    output:
+        index="full_merged_files/{sample}_all.nodups.pairs.gz.px2"
+    input:
+        merged=rules.merge_per_sample.output.merged
+    conda:
+        "rcmc_new.yml"
+    resources:
+        mem_mb=4000
+    shell:
+        "pairix {input.merged}"
+
+# Bin pairs files into 50bp bins
+rule cooler_cload:
+    output:
+        cool="full_merged_files/{sample}_all.50.cool"
+    input:
+        merged=rules.merge_per_sample.output.merged,
+        idx=rules.pairix_indexing.output.index,
+        chromsizes="/home/gridsan/chong/genomes/hg38/hg38.sorted.chrom.sizes"
+    conda:
+        "rcmc_new.yml"
+    threads: 3
+    resources:
+        mem_mb=160000
+    params:
+        assembly="hg38"
+    shell:
+        "bgzip -cd -@ {threads} "
+        "{input.merged} "
+        "| cooler cload pairs -c1 2 -p1 3 -c2 4 -p2 5 "
+        "--assembly {params.assembly} "
+        "--temp-dir $TMP {input.chromsizes}:50 - "
+        "{output.cool}"
+
+# Zoomify to get multi-resolution .mcool file
+rule zoomify:
+    output:
+        mcool="full_merged_files/{sample}_all.50.mcool"
+    input:
+        cool=rules.cooler_cload.output.cool
+    conda:
+        "rcmc_new.yml"
+    threads: 8
+    params:
+        res="10000000,5000000,2500000,1000000,500000,250000,100000,50000,25000,10000,6400,5000,3200,2000,1600,1000,800,500,400,300,250,200,150,100,50"
+    shell:
+        "cooler zoomify --nproc {threads} "
+        "--balance --out {output.mcool} "
+        "--resolutions {params.res} "
+        "{input.cool}"
+
+### MCOOLS PER REP
+# same steps but to generate .mcool files per replicate
+
+rule pairix_indexing_by_rep:
+    output:
+        index=base_path + "merged_per_rep/{sample}_{rep}_merged.nodups.pairs.gz.px2"
+    input:
+        merged=rules.merge_per_rep.output.merged
+    conda:
+        "rcmc_new.yml"
+    resources:
+        mem_mb=4000
+    shell:
+        "pairix {input.merged}"
+
+rule cooler_cload_by_rep:
+    output:
+        cool="mcools_per_rep/{sample}_{rep}_all.50.cool"
+    input:
+        merged=rules.merge_per_rep.output.merged,
+        idx=rules.pairix_indexing_by_rep.output.index,
+        chromsizes="/home/gridsan/chong/genomes/hg38/hg38.sorted.chrom.sizes"
+    conda:
+        "rcmc_new.yml"
+    threads: 3
+    params:
+        assembly="hg38"
+    shell:
+        "bgzip -cd -@ {threads} "
+        "{input.merged} "
+        "| cooler cload pairs -c1 2 -p1 3 -c2 4 -p2 5 "
+        "--assembly {params.assembly} "
+        "--temp-dir $TMP {input.chromsizes}:50 - "
+        "{output.cool}"
+
+rule zoomify_by_rep:
+    output:
+        mcool="mcools_per_rep/{sample}_{rep}_all.50.mcool"
+    input:
+        cool=rules.cooler_cload_by_rep.output.cool
+    conda:
+        "rcmc_new.yml"
+    threads: 8
+    params:
+        res="10000000,5000000,2500000,1000000,500000,250000,100000,50000,25000,10000,6400,5000,3200,2000,1600,1000,800,500,400,300,250,200,150,100,50"
+    shell:
+        "cooler zoomify --nproc {threads} "
+        "--balance --out {output.mcool} "
+        "--resolutions {params.res} "
+        "{input.cool}"
+
+final_files = []
+
+for sample_name in list(set(sample_map_df['sample'])):
+    # change this to change filenames if preferred
+    final_files.append('full_merged_files/' + sample_name + '_all.50.mcool')
+
+rule all:
+    input: all_files=final_files
+
+# to generate .mcool files for each replicate
+rep_files = []
+
+for row in sample_map_df.itertuples():
+    rep_file = rules.zoomify_by_rep.output.mcool.format(
+            sample=row.sample, rep=row.rep
+        )
+    rep_files.append(rep_file)
+
+rep_files = list(set(rep_files))
+
+rule all_reps:
+    input: rep_files=rep_files
