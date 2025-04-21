@@ -1,8 +1,7 @@
-The files in this folder are for contact map quality comparisons in Supplementary figure 2. 
+### Scripts for contact map quality comparisons between RCMC and Micro-C and/or Hi-C.
 
-Files:
-1. calculate_resolution_rao.py: for calculating 'resolution' of contact maps
-Usage:
+1. `calculate_resolution_rao.py`: for calculating 'resolution' of contact maps
+
 ```
 usage: calculate_resolution_rao.py [-h] [--input INPUT] [--regions REGIONS] [--output_basename OUTPUT_BASENAME]
 
@@ -16,5 +15,5 @@ options:
                         output basename
 ```
 
-2. contact_map_comparisons.ipynb: calculate P(s) and fraction of bins filled
-3. contact_map_comparisons_plotting.Rmd: plot figures
+2. `contact_map_comparisons.ipynb`: calculate P(s) and fraction of bins filled
+3. `contact_map_comparisons_plotting.Rmd`: plot figures

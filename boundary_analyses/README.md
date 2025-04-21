@@ -1,8 +1,8 @@
-Scripts for identifying and analyzing fine-scale insulation boundaries in 3D genomics data.
+### Scripts for identifying and analyzing fine-scale insulation boundaries in 3D genomics data.
 
 Files:
-1. call_insulation_domains.py: get insulation boundary bed files and insulation scores
-Example usage:
+1. `call_insulation_domains.py`: get insulation boundary bed files and insulation scores
+
 ```
 usage: call_insulation_domains.py [-h] clr window out_path
 
@@ -26,5 +26,5 @@ bedtools sort -header -i <scores_output.bedGraph> > <scores_output_sorted.bedGra
 bedGraphToBigWig <scores_output_sorted.bedGraph> <chrom.sizes file> <scores.bw>
 ```
 
-2. boundary_analyses.Rmd: Perform boundary-related analyses in manuscript
-3. plot_boundaries_epigenomics.Rmd: ChIP-seq metaplots of boundaries
+2. `boundary_analyses.Rmd`: Perform boundary-related analyses in manuscript
+3. `plot_boundaries_epigenomics.Rmd`: ChIP-seq metaplots of boundaries
