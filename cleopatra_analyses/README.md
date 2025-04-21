@@ -46,3 +46,4 @@ options:
 
 3. `cleopatra_correlations.ipynb`: calculate Pearson's correlation by distance between different coolers
 4. `cleopatra_correlations.Rmd`: plot Pearson's correlation by distance between different coolers
+5. `less_epi_pileups.ipynb`: plot pileups for less input models

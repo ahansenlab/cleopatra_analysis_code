@@ -1,0 +1,176 @@
+---
+title: "Untitled"
+output: html_document
+date: "2025-04-21"
+---
+
+```{r}
+library(gghalves)
+library(ggstatsplot)
+library(EnrichedHeatmap)
+library(tidyverse)
+```
+
+```{r}
+source('src.R')
+```
+
+### Comparisons of loops across celltypes
+
+```{r}
+# read loops that have been merged in loop_celltype_comparisons.ipynb
+read_merge_updated_loops = function(filename){
+    
+    read_tsv(filename, col_names = c('chr1', 'start1', 'end1', 'chr2', 'start2', 'end2', 'updated_id'),
+             show_col_types = FALSE) 
+}
+```
+
+```{r}
+merge_updated_loops = fs::dir_ls(path = '../example_data/loop_examples/', glob = '*_updated.bedpe') |> 
+    as.character() |> 
+    purrr::set_names(function(x) {
+    str_sub(fs::path_file(x), end = - str_length('_rcmc_all_updated.bedpe') - 1)
+    }) |> 
+    map(~ read_merge_updated_loops(.x))
+```
+
+```{r}
+lt = list(GM12878 = merge_updated_loops$GM12878$updated_id,
+     HCT116 = merge_updated_loops$HCT116$updated_id,
+     K562 = merge_updated_loops$K562$updated_id,
+     H1 = merge_updated_loops$H1$updated_id
+)
+
+pdf('figures/loop_overlap_between_celltypes.pdf', width = 5, height = 3)
+loop_m1 = make_comb_mat(lt)
+UpSet(loop_m1)
+dev.off()
+```
+
+Get unique loops from overlap 
+
+```{r}
+GM12878_unique_loops = extract_comb(loop_m1, comb_name = '1000')
+HCT116_unique_loops = extract_comb(loop_m1, comb_name = '0100')
+H1_unique_loops = extract_comb(loop_m1, comb_name = '0001')
+K562_unique_loops = extract_comb(loop_m1, comb_name = '0010')
+```
+
+```{r}
+unique_loops = list('GM12878' = GM12878_unique_loops,
+                    'HCT116' = HCT116_unique_loops,
+                    'H1' = H1_unique_loops,
+                    'K562' = K562_unique_loops) |> 
+    map(~ as_tibble(.x)) |>
+    map(~ separate(.x, value, into = c('celltype', 'name'), sep = ':')) |>
+    map(~ separate(.x, name, into = c('chrom1', 'center1', 'center2'), sep = '_', remove = FALSE)) |> 
+    reduce(bind_rows) |>
+    mutate(across(contains('center'), as.double)) |> 
+    mutate(start1 = center1 - 500, end1 = center1 + 500,
+           start2 = center2 - 500, end2 = center2 + 500,
+           chrom2 = chrom1) 
+```
+
+```{r}
+all_annotated_loops = read_tsv('../example_data/loop_examples/all_rcmc_annotated_loops.tsv')
+```
+
+Plot percentage of shared/cell-type-specific loops
+
+```{r}
+all_annotated_loops_unique_shared = unique_loops |> 
+    mutate(unique = 'unique') |> 
+    full_join(all_annotated_loops, by = c('name', 'celltype','start1', 'end1', 'start2', 'end2')) |>
+    mutate(unique = replace_na(unique, 'shared')) 
+
+all_annotated_loops_unique_shared |> 
+    mutate(celltype = factor(celltype, levels = rev(celltypes))) |> 
+  ggbarstats(unique, celltype,
+             results.subtitle = FALSE,
+             label.args = list(alpha = 0.7, fill = "white",
+                                         size = 4),
+            sample.size.label.args = list(size = 3,
+                                         y = 1.015,
+                                         vjust = -0.5),
+    ggplot.component = list(scale_fill_manual(values = c('#EFD5B8', '#97735B')),
+                            plot_theme(),
+                            theme(text = element_text(size = 14)),
+                            scale_y_continuous(expand = expansion(mult = c(0, 0.05)))
+                            )) +
+    xlab('') +
+    coord_flip()
+
+ggsave('figures/perc_unique_shared_loops.pdf', width = 6, height = 3)
+```
+
+Plot what loop classes the loops are enriched in 
+
+```{r}
+all_annotated_loops_unique_shared |> 
+    mutate(loop_class_collapsed = case_when(
+            grepl('E|P', loop_class) ~ 'CRE',
+            grepl('CTCF', loop_class) ~ 'CTCF',
+            TRUE ~ 'other'
+    )) |> 
+    mutate(loop_class = factor(loop_class, levels = loop_order),
+           celltype = factor(celltype, levels = celltypes)) |>
+    grouped_ggbarstats(loop_class, unique,
+                       grouping.var = celltype,
+                       plotgrid.args = list(nrow = 1),
+                       results.subtitle = FALSE,
+                    label.args = list(alpha = 0.7, fill = "white",
+                                         size = 3),
+                       sample.size.label.args = list(size = 2.3,
+                                                     y = 1.015,
+                                                     vjust = -0.5),
+                       ggplot.component = list(scale_fill_manual(values = rev(loop_colours)),
+                                           plot_theme(),
+                                           theme(text = element_text(size = 10)),
+                                           scale_y_continuous(expand = expansion(mult = c(0, 0.05))),
+                                           xlab(''))
+                       ) 
+
+ggsave('figures/unique_loops_enrichment.pdf', width = 8, height = 5)
+```
+
+### Loop strength comparisons
+
+```{r}
+read_loop_strengths = function(filename, cell_type){
+    
+    read_tsv(filename, show_col_types = FALSE) |> 
+        mutate(celltype := !!cell_type)
+}
+```
+
+```{r message=F}
+loop_strengths = celltypes |> 
+    set_names() |> 
+    map(~ read_loop_strengths(paste0('../example_data/loop_examples/', .x, '_rcmc_loop_strength_oe_3kb.tsv'), .x))
+```
+
+Compare loop strengths of shared/cell-type-specific loops
+
+```{r}
+tmp = all_annotated_loops_unique_shared |> 
+    inner_join(all_loop_strengths, by = c('celltype', 'name' = 'loop_id')) |>
+    filter(loop_strength > 0) |> 
+    mutate(loop_strength = log2(loop_strength)) |>
+    mutate(celltype = factor(celltype, levels = celltypes))
+
+filter(tmp, unique == 'shared') |>   
+    ggplot(aes(celltype, loop_strength)) +
+    geom_half_violin(fill = '#EFD5B8', col = NA) +
+    geom_half_boxplot(width = 0.1, outliers = FALSE, fill = 'white', errorbar.draw = FALSE) +
+    geom_half_violin(data = tmp |> filter(unique == 'unique'), mapping = aes(celltype, loop_strength),
+                     side = 'r', fill = '#97735B', col = NA) +
+    geom_half_boxplot(data = tmp |> filter(unique == 'unique'), mapping = aes(celltype, loop_strength), 
+                      width = 0.1, side = 'r', outliers = FALSE, fill = 'white', errorbar.draw = FALSE) +
+    plot_theme() +
+    ylab('loop strength') +
+    xlab('')
+
+ggsave('figures/loop_strength_unique_shared.pdf', width = 5, height = 4)
+```
+

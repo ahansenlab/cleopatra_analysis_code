@@ -1,0 +1,337 @@
+---
+title: "Untitled"
+output: html_document
+date: "2025-04-21"
+---
+
+```{r}
+library(ComplexHeatmap)
+library(circlize)
+library(plyranges)
+library(InteractionSet)
+library(GenomicInteractions)
+library(GenomicRanges)
+library(tidyverse)
+```
+
+```{r}
+source('src.R')
+```
+
+### RCMC loops used as an example in this notebook, same can be used for Cleopatra loops
+### Annotate loops with enhancer, promoter or CTCF
+
+Read cCREs from SCREEN 
+
+```{r}
+get_cCREs = function(screen){
+    
+    screen_cCREs = read_tsv(screen,
+             show_col_types = FALSE,
+             col_names = c('chr', 'start', 'end', 'name', paste0('extra', c(1:5)), 'classification', 'extra6')) |>  
+            dplyr::select(-contains('extra'))  
+    
+    enhancer_cCREs = screen_cCREs |> 
+    dplyr::filter(grepl('ELS', classification)) |> 
+    makeGRangesFromDataFrame(keep.extra.columns = TRUE)
+
+    promoter_cCREs = screen_cCREs |> 
+    dplyr::filter(grepl('PLS', classification)) |> 
+    makeGRangesFromDataFrame(keep.extra.columns = TRUE)
+
+    CTCF_cCREs = screen_cCREs |> 
+    dplyr::filter(grepl('CTCF-bound', classification)) |> 
+    dplyr::filter(!grepl('ELS|PLS', classification)) |> 
+    makeGRangesFromDataFrame(keep.extra.columns = TRUE)
+    
+    list("enhancer" = enhancer_cCREs, "promoter" = promoter_cCREs, "CTCF" = CTCF_cCREs)
+} 
+```
+
+```{r}
+GM12878_cCREs = get_cCREs('../../Genome annotations/GM12878/SCREEN_cCREs.bed')
+HCT116_cCREs = get_cCREs('../../Genome annotations/HCT116/SCREEN_cCREs.bed')
+H1_cCREs = get_cCREs('../../Genome annotations/H1/SCREEN_cCREs.bed')
+K562_cCREs = get_cCREs('../../Genome annotations/K562/SCREEN_cCREs.bed')
+
+cCREs = list('GM12878' = GM12878_cCREs, 'HCT116' = HCT116_cCREs, 'K562' = K562_cCREs, 'H1' = H1_cCREs)
+```
+
+Read loops in bedpe format 
+
+```{r}
+import_bedpe = function(file) {
+  df = read_tsv(file, col_names = FALSE, show_col_types = FALSE) 
+  gr1 = GRanges(df$X1, IRanges(df$X2, df$X3))
+  gr2 = GRanges(df$X4, IRanges(df$X5, df$X6))
+  makeGInteractionsFromGRangesPairs(Pairs(gr1, gr2, name=df[['X7']]))
+}
+```
+
+```{r}
+loops_GI = set_names(celltypes) |> 
+    map(~ import_bedpe(paste0('../example_data/loop_examples/', .x, '_rcmc_all_1kb.bedpe')))
+```
+
+Annotate loops
+
+```{r}
+annotate_CREs = function(gi, cre, cre_name, extend=FALSE){
+    
+        if (extend != FALSE){
+            # Extend anchor1
+            anchor_one = resize(anchorOne(gi), width = width(anchorOne(gi)) + extend, fix = "center")
+            
+            # Extend anchor2 
+            anchor_two = resize(anchorTwo(gi), width = width(anchorTwo(gi)) + extend, fix = "center")
+            
+            updated_gi = GInteractions(anchor_one, anchor_two)
+            
+        } else {
+            updated_gi = gi
+        }
+    
+        overlap1 = InteractionSet::findOverlaps(updated_gi, cre, use.region="first")
+        overlap2 = InteractionSet::findOverlaps(updated_gi, cre, use.region="second")
+        
+        anchor1 = as_tibble(gi[queryHits(overlap1)]) |> 
+            dplyr::select(-contains('width'), -contains('strand')) |>
+            mutate(anch1_anno = cre_name) |> 
+            distinct()
+        
+        anchor2 = as_tibble(gi[queryHits(overlap2)]) |> 
+            dplyr::select(-contains('width'), -contains('strand')) |>
+            mutate(anch2_anno = cre_name) |> 
+            distinct()
+        
+        full_join(anchor1, anchor2)
+}
+```
+
+```{r}
+annotate_loop_classes = function(loops, cCREs, celltype, extend=FALSE){
+    
+    names(cCREs) |> 
+    map(~annotate_CREs(loops, cCREs[[.x]], .x, extend=extend)) |> 
+    reduce(full_join, by = c('seqnames1', 'start1', 'end1', 'seqnames2', 'start2', 'end2', 'name')) |>
+    full_join(as_tibble(loops) |>
+                  dplyr::select('seqnames1', 'start1', 'end1', 'seqnames2', 'start2', 'end2', 'name')) |>
+    mutate(selected_anch1 = case_when(
+        anch1_anno.y == 'promoter' ~ 'promoter',
+        anch1_anno.x == 'enhancer' ~ 'enhancer',
+        anch1_anno == 'CTCF' ~ 'CTCF',
+        TRUE ~ 'NA'
+    ), selected_anch2 = case_when(
+        anch2_anno.y == 'promoter' ~ 'promoter',
+        anch2_anno.x == 'enhancer' ~ 'enhancer',
+        anch2_anno == 'CTCF' ~ 'CTCF',
+        TRUE ~ 'NA'
+    )) |>
+    dplyr::select(-contains('anno')) |>
+    mutate(loop_class = case_when(
+        selected_anch1 == 'enhancer' & selected_anch2 == 'promoter' ~ 'E-P',
+        selected_anch1 == 'promoter' & selected_anch2 == 'enhancer' ~ 'E-P',
+        selected_anch1 == 'promoter' & selected_anch2 == 'promoter' ~ 'P-P',
+        selected_anch1 == 'enhancer' & selected_anch2 == 'enhancer' ~ 'E-E',
+        selected_anch1 == 'promoter' | selected_anch2 == 'promoter' ~ 'E/P-other',
+        selected_anch1 == 'enhancer' | selected_anch2 == 'enhancer' ~ 'E/P-other',
+        selected_anch1 == 'CTCF' & selected_anch2 == 'CTCF' ~ 'CTCF-CTCF',
+        selected_anch1 == 'CTCF' | selected_anch2 == 'CTCF' ~ 'CTCF-other',
+        TRUE ~ 'other-other'
+    ), celltype = celltype) 
+}
+```
+
+```{r}
+all_annotated_loops = set_names(celltypes) |> 
+    map(~ annotate_loop_classes(loops_GI[[.x]], cCREs[[.x]], .x)) |> 
+    reduce(bind_rows)
+```
+
+Plot annotation fractions
+
+```{r}
+count_annotation_fraction = function(annotated_loops){
+    
+    df = annotated_loops |> 
+        count(loop_class, celltype)
+    
+    # Calculate the total sum of all numeric columns
+    total = sum(sapply(df[sapply(df, is.numeric)], sum), na.rm = TRUE)
+    
+    # Convert numeric columns to fractions
+    df_fractions = df %>%
+        mutate(across(where(is.numeric), ~./total)) |> 
+        mutate(frac = paste0(signif(100 * n, 2), "%"))
+    
+    return(df_fractions)
+}
+```
+
+```{r}
+rcmc_loop_classification = all_annotated_loops %>% 
+    split(.$celltype) |>
+    map(~ count_annotation_fraction(.x)) |> 
+    reduce(bind_rows) 
+
+rcmc_loop_classification |> 
+    mutate(loop_class = factor(loop_class, levels = loop_order), 
+           celltype = factor(celltype, levels = celltypes)) |> 
+    ggplot(aes(x = '', y = n, fill = loop_class)) +
+    geom_col() +
+    coord_polar(theta = "y") +
+    theme_void(base_family = 'Helvetica', base_size = 10) +
+    theme(legend.position = 'bottom') +
+    guides(fill = guide_legend(nrow = 1)) +
+    facet_wrap(~ celltype, nrow = 1) +
+    scale_fill_manual(values = loop_colours) +
+    geom_text(aes(label = frac, x = 1.15), position = position_stack(vjust = 0.5), size = 3.5, col = 'black') 
+
+ggsave('figures/loop_class_annotations.pdf', width = 8, height = 3)
+```
+
+### Read loop strengths
+
+```{r}
+read_loop_strengths = function(filename, cell_type){
+    
+    read_tsv(filename, show_col_types = FALSE) |> 
+        mutate(celltype := !!cell_type)
+}
+```
+
+```{r message=F}
+loop_strengths = celltypes |> 
+    set_names() |> 
+    map(~ read_loop_strengths(paste0('../example_data/loop_examples/', .x, '_rcmc_loop_strength_oe_3kb.tsv'), .x))
+```
+
+### Plot loop anchor epigenomic scores
+
+Process output from calculate_loop_anchor_epi_scores.py
+
+```{r}
+read_episcores_per_rep = function(episcores){
+    read_tsv(episcores, show_col_types = FALSE) |> 
+    mutate(loop_anchor = paste(chrom, start, end, sep = '_')) |> 
+    dplyr::select(-chrom, -start, -end)
+}
+```
+
+```{r}
+episcores_per_rep = set_names(celltypes) |> 
+    map(~ read_episcores_per_rep(paste0('loop_classification/', .x, '_merged_1kb_anchor_episcores.tsv')))
+```
+
+```{r}
+get_all_epimarks = function(episcores){
+    dplyr::select(episcores, -loop_anchor) |> 
+    colnames() |> 
+    map(~ str_split(.x, '_')[[1]][1]) |> 
+    as.character() |> 
+    unique()
+}
+```
+
+```{r}
+all_epimarks = episcores_per_rep |> 
+    map(get_all_epimarks)
+```
+
+Only plot epigenomics marks that all cell types have data for
+
+```{r}
+common_epimarks = all_epimarks |> 
+    map(~ as_tibble(.x)) |> 
+    reduce(inner_join)
+```
+
+Identify loop anchors of each loop to match to epigenomic enrichment data
+
+```{r}
+get_loop_anchor_mapping = function(bedpe_file){
+    read_tsv(bedpe_file,
+         col_names = c('chr1', 'start1', 'end1', 'chr2', 'start2', 'end2', 'loop_id'),
+         show_col_types = FALSE) |> 
+    mutate(loop_anchor1 = paste(chr1, start1, end1, sep = '_'),
+           loop_anchor2 = paste(chr2, start2, end2, sep = '_')) |> 
+    dplyr::select(contains('loop'))
+}
+```
+
+```{r}
+loop_anchor_mapping = celltypes |> 
+    set_names() |> 
+    map(~ get_loop_anchor_mapping(paste0('../example_data/loop_examples/', .x, '_rcmc_all_1kb.bedpe')))
+```
+
+Filter loops by loop strength to remove false positive loop calls
+
+```{r}
+get_loop_scores_per_anchor = function(loop_anchor_map, loop_strength, episcores){
+    loop_anchor_map |>
+    left_join(loop_strength, by = 'loop_id') |>
+    dplyr::filter(!is.na(loop_strength)) |>
+    left_join(episcores, by = c('loop_anchor1' = 'loop_anchor')) |>
+    left_join(episcores, by = c('loop_anchor2' = 'loop_anchor'), suffix = c('_anchor1', '_anchor2'))
+}
+```
+
+```{r}
+all_loop_scores_full = celltypes |> 
+    set_names() |> 
+    map(~ get_loop_scores_per_anchor(loop_anchor_mapping[[.x]], loop_strengths[[.x]], all_episcores[[.x]]))
+```
+
+Average epigenomic scores across both anchors of a loop
+
+```{r}
+loop_scores_averaged = celltypes |> 
+    set_names() |> 
+    map(function(x){avg_episcore_reps(all_loop_scores_full[[x]], all_epimarks[[x]]) |> 
+    inner_join(all_loop_scores_full[[x]] |> dplyr::select(contains('loop'), celltype))
+    }
+    )
+```
+
+Average epigenomic scores for each loop class and scale to plot everything on same colour scale
+
+```{r}
+calculate_avg_epi_scores = function(df){
+    
+    pattern = paste(common_epimarks$value, collapse = "|")
+    
+    group_by(df, loop_class) |> 
+        summarize(across(matches(pattern), ~ mean(.x, na.rm = TRUE))) |> 
+        mutate(celltype = df$celltype[[1]]) |>
+        column_to_rownames('loop_class') |>
+        select(-contains('loop')) |>
+        select(matches(pattern), celltype) |>
+        mutate(across(where(is.double), scale))
+}
+```
+
+```{r}
+avg_epi_scores = set_names(celltypes) |> 
+    map(~ inner_join(loop_scores_averaged[[.x]], all_annotated_loops_list[[.x]],  by = c('loop_id' = 'name'))) |> 
+    map(~ calculate_avg_epi_scores(.x)) |> 
+    reduce(bind_rows) |> 
+    mutate(celltype = factor(celltype, levels = celltypes))
+```
+
+Plot heatmap
+
+```{r}
+pdf('figures/avg_common_episcores_vertical.pdf', width = 8, height = 5)
+col_fun = colorRamp2(c(-1.5, 0, 1.5), viridis::inferno(3))
+
+Heatmap(as.matrix(select(avg_epi_scores, -celltype)) |> t(),
+    name = 'episcores_per_anchor',
+    col = col_fun,
+    row_title_rot = FALSE,
+    show_column_dend = FALSE,
+    cluster_columns = FALSE,
+    column_split = avg_epi_scores$celltype
+    ) 
+dev.off()
+```

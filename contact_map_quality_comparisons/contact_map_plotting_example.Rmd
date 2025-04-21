@@ -1,0 +1,274 @@
+---
+title: "Contact map plotting example"
+output: html_document
+date: "2025-04-20"
+---
+
+```{r}
+library(HiContacts)
+library(plotlandscaper)
+library(rasterize)
+library(tidyverse)
+```
+
+```{r}
+read_specific_region = function(filename, type){
+    if (type == 'exp'){
+        read_tsv(filename, show_col_types = FALSE) |> 
+            select(start1, start2, balanced) |> 
+            filter(!is.na(balanced))
+    } else if (type == 'pred'){
+        read_tsv(filename, show_col_types = FALSE) |> 
+            select(start1, start2, count)
+    }
+}
+```
+
+### Micro-C vs RCMC contact map plotting example
+
+```{r}
+pdf('microc_rcmc_example.pdf', width = 8, height = 4)
+pageCreate(width = 8, height = 4, default.units = "inches", showGuides = FALSE)
+
+x1 = 0.5
+x2 = 3.7
+current_height = 3
+current_width = 3
+
+genomicRegion = pgParams(chrom = 'chr6', chromstart = 25916880, chromend = 26576463, assembly = "hg38")
+
+for (x in c(x1, x2)){
+    plotGenes(
+        params = genomicRegion,
+        fill = 'black',
+        fontcolor = 'black',
+        x = x, y = 0, width = 3, height = 0.5,
+        just = c("left", "top"), default.units = "inches",
+        strandLabels = FALSE,
+        assembly = assembly(Genome = "hg38refGene", TxDb = "TxDb.Hsapiens.UCSC.hg38.refGene", OrgDb = "org.Hs.eg.db")
+    )
+}
+
+current_rcmc = read_specific_region('example_data/contact_map_examples/GM12878_rcmc_region1_1kb.txt', 'exp')
+rcmc_plot = plotHicSquare(
+    data = current_rcmc,
+    params = genomicRegion,
+    colorTrans = "log",
+    zrange = c(min(current_rcmc), 0.7),
+    yaxisDir = 'decrease',
+    palette = colorRampPalette(coolerColors()),
+    half = 'top',
+    x = x1, y = 0.5,
+    width = 3, height = 3,
+    border_width = 2
+
+)
+
+current_microc = read_specific_region('example_data/contact_map_examples/GM12878_microc_region1_1kb.txt', 'exp')
+plotHicSquare(
+    data = current_microc,
+    params = genomicRegion,
+    colorTrans = "log",
+    zrange = c(min(current_rcmc), 0.7),
+    yaxisDir = 'decrease',
+    palette = colorRampPalette(coolerColors()),
+    half = 'bottom',
+    x = x1, y = 0.5,
+    width = 3, height = 3,
+    border_width = 2
+)
+
+genomicRegion2 = pgParams(chrom = 'chr6', chromstart = 26005023, chromend = 26297325, assembly = "hg38")
+
+current_rcmc = read_specific_region('example_data/contact_map_examples/GM12878_rcmc_region1_200bp.txt', 'exp')
+rcmc_200bp_plot = plotHicSquare(
+    data = current_rcmc,
+    params = genomicRegion2,
+    colorTrans = "log",
+    zrange = c(min(current_rcmc), 0.1),
+    yaxisDir = 'decrease',
+    palette = colorRampPalette(coolerColors()),
+    half = 'top',
+    x = x2, y = 0.5,
+    width = 3, height = 3,
+    border_width = 2
+)
+
+current_microc = read_specific_region('example_data/contact_map_examples/GM12878_microc_region1_200bp.txt', 'exp')
+plotHicSquare(
+    data = current_microc,
+    params = genomicRegion2,
+    colorTrans = "log",
+    zrange = c(min(current_rcmc), 0.1),
+    yaxisDir = 'decrease',
+    palette = colorRampPalette(coolerColors()),
+    half = 'bottom',
+    x = x2, y = 0.5,
+    width = 3, height = 3,
+    border_width = 2
+)
+
+annoHeatmapLegend(plot = rcmc_plot, 
+    x = 0.35, y = 0.5, width = 0.1, height = 3,
+    ticks = TRUE, scientific = TRUE, fontcolor = 'black',
+    breaks = c(1E-5, 1E-4, 1E-3, 1E-2, 1E-1),
+    border_width = 1,
+    fontsize = 8, flip = TRUE
+)
+
+annoHeatmapLegend(plot = rcmc_200bp_plot,
+    x = x2 + 3.05, y = 0.5, width = 0.1, height = 3,
+    ticks = TRUE, scientific = TRUE, fontcolor = 'black',
+    breaks = c(1E-5, 1E-4, 1E-3, 1E-2, 1E-1),
+    border_width = 1,
+    fontsize = 8
+)
+
+for (x in c(x1, x2)){
+    plotText('Micro-C', x = x + 0.1, y = 0.5 + 2.8, just = 'left', fontsize = 14, fontface = 'bold')
+    plotText('RCMC', x = x + 2.9, y = 0.5 + 0.2, just = 'right', fontsize = 14, fontface = 'bold')
+}
+
+plotGenomeLabel(params = genomicRegion, 
+                scale = "Mb", fontsize = 11,
+                x = x1, y = 3.5, length = 3,
+                at = c(26000000, 26300000)
+)
+
+plotGenomeLabel(params = genomicRegion2, 
+                scale = "Mb", fontsize = 11,
+                x = x2, y = 3.5, length = 3,
+                at = c(26100000, 26200000)
+)
+
+dev.off()
+```
+
+### RCMC vs Cleopatra contact map plotting example
+
+```{r}
+pdf('rcmc_cleo_example.pdf', width = 7, height = 5)
+pageCreate(width = 7, height = 4, default.units = "inches", showGuides = FALSE)
+
+x1 = 0
+x2 = 3.2
+current_height = 3
+current_width = 3
+
+genomicRegion = pgParams(chrom = 'chr8', chromstart = 126724946, chromend = 128925132, assembly = "hg38")
+
+current_rcmc = read_specific_region('example_data/contact_map_examples/GM12878_rcmc_region6_2kb.txt', 'exp')
+plotHicSquare(
+    data = current_rcmc,
+    params = genomicRegion,
+    assembly = "hg38",
+    colorTrans = "log",
+    zrange = c(min(current_rcmc), 0.1),
+    yaxisDir = 'decrease',
+    palette = colorRampPalette(coolerColors()),
+    x = 0, y = 0,
+    width = current_width, height = current_width,
+    half = 'bottom'
+)
+
+current_pred = read_specific_region('example_data/contact_map_examples/GM12878_2kb_cleo_holdout_region6_2kb.txt', 'pred')
+plotHicSquare(
+    data = current_pred,
+    params = genomicRegion,
+    assembly = "hg38",
+    colorTrans = "log",
+    zrange = c(min(current_rcmc), 0.1),
+    yaxisDir = 'decrease',
+    palette = colorRampPalette(coolerColors()),
+    x = 0, y = 0,
+    width = current_width, height = current_width,
+    half = 'top'
+)
+
+plotGenomeLabel(params = genomicRegion, scale = "Mb", 
+            x = 0, y = 3, length = current_width,
+            at = c(127500000, 128500000))
+    
+genomicRegion2 = pgParams(chrom = 'chr8', chromstart = 127748923, chromend = 128301078, assembly = "hg38")
+
+current_rcmc = read_specific_region('example_data/contact_map_examples/GM12878_rcmc_region6_500bp.txt', 'exp')
+plotHicSquare(
+    data = current_rcmc,
+    params = genomicRegion2,
+    assembly = "hg38",
+    colorTrans = "log",
+    zrange = c(min(current_rcmc$balanced), 0.02),
+    yaxisDir = 'decrease',
+    palette = colorRampPalette(coolerColors()),
+    x = x2, y = 0,
+    width = current_width, height = current_width,
+    half = 'bottom'
+)
+
+current_pred = read_specific_region('example_data/contact_map_examples/GM12878_500bp_cleo_holdout_region6_500bp.txt', 'pred')
+plotHicSquare(
+    data = current_pred,
+    params = genomicRegion2,
+    assembly = "hg38",
+    colorTrans = "log",
+    zrange = c(min(current_rcmc$balanced), 0.02),
+    yaxisDir = 'decrease',
+    palette = colorRampPalette(coolerColors()),
+    x = x2, y = 0,
+    width = current_width, height = current_width,
+    half = 'top'
+)
+
+plotGenomeLabel(params = genomicRegion2, scale = "Mb", 
+                x = x2, y = 3, length = current_width,
+                at = c(127900000, 128200000))
+
+plotSignal(
+    data = 'example_data/contact_map_examples/GM12878_2kb_insulation.bw', 
+    params = genomicRegion, 
+    x = 0, y = 3.3,
+    width = 3, 
+    height = 0.5,
+    linecolor = '#8b5f3c',
+    baseline = FALSE,
+    negData = TRUE
+)
+
+plotSignal(
+    data = 'example_data/contact_map_examples/GM12878_2kb_cleo_insulation.bw', 
+    params = genomicRegion, 
+    x = 0, y = 3.8,
+    width = 3, 
+    height = 0.5,
+    linecolor = '#e9714c',
+    negData = TRUE
+)
+
+plotSignal(
+    data = 'example_data/contact_map_examples/GM12878_500bp_insulation.bw', 
+    params = genomicRegion2, 
+    x = x2, y = 3.3,
+    width = 3, 
+    height = 0.5,
+    linecolor = '#8b5f3c',
+    negData = TRUE
+)
+
+plotSignal(
+    data = 'example_data/contact_map_examples/GM12878_500bp_cleo_insulation.bw', 
+    params = genomicRegion2, 
+    x = x2, y = 3.8,
+    width = 3, 
+    height = 0.5,        
+    linecolor = '#e9714c',
+    negData = TRUE
+)
+
+plotText('RCMC', x = x1 + 0.1, y = 2.8, just = 'left', fontsize = 14, fontface = 'bold')
+plotText('2kb Cleopatra', x = x1 + 2.9, y = 0.2, just = 'right', fontsize = 14, fontface = 'bold')
+plotText('RCMC', x = x2 + 0.1, y = 2.8, just = 'left', fontsize = 14, fontface = 'bold')
+plotText('500bp Cleopatra', x = x2 + 2.9, y = 0.2, just = 'right', fontsize = 14, fontface = 'bold')
+
+
+dev.off()
+```
