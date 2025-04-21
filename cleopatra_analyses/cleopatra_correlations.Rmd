@@ -1,0 +1,37 @@
+```{r}
+library(tidyverse)
+```
+
+```{r}
+source('/mnt/md0/clarice/src/plot_themes.R')
+```
+
+One example shown here, same code can be used for all comparisons 
+
+```{r}
+# read correlations output by cleopatra_correlations.ipynb
+corrs = fs::dir_ls(path = './diag_corrs/', glob = '*.tsv') |>
+    as.character() |>
+    purrr::set_names(function(x) {
+    str_sub(fs::path_file(x), end = - str_length('_diag_corrs.tsv') - 1)
+    }) |>
+    map(~ read_tsv(.x, show_col_types = FALSE))
+```
+
+```{r}
+c('GM12878_model_25', 'HCT116_model_23', 'K562_model_21', 'H1_model_27') |>
+    map(~ mutate(corrs[[.x]], model = .x)) |>
+    reduce(bind_rows) |>
+    filter(region_id %in% c('region3', 'region5', 'region10')) |>
+    mutate(region_id = factor(region_id, levels = c('region3', 'region5', 'region10')),
+            model = factor(model, levels = c('GM12878_model_25', 'HCT116_model_23', 'K562_model_21', 'H1_model_27'))) |>
+    ggplot(aes(distance, corr, col = model)) +
+    geom_smooth() +
+    ylim(0, 1) +
+    plot_theme() +
+    scale_color_manual(values = c('#23344d', '#136F63', '#C64191', '#E0A458')) +
+    scale_x_continuous(labels = label_kb) +
+    theme(legend.position = c(0.5, 0.2)) 
+
+ggsave('figures/holdout_models_newtest_1.pdf', width = 8, height = 6)
+```

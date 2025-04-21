@@ -1,6 +1,6 @@
-Scripts for Cleopatra-related analyses.
+### Scripts for Cleopatra-related analyses.
 
-1. make_cooler.py: Generates coolers for holdout regions to benchmark Cleopatra. 
+1. `make_cooler.py`: Generates coolers for holdout regions to benchmark Cleopatra. 
 
 ```
 usage: make_cooler.py [-h] [-p PREFIX] [-c] matrices bin_size oe_vectors regions out_path out
@@ -22,7 +22,8 @@ options:
   -c, --convolve        Whether to apply convolution to smooth the matrices
 ```
 
-2. make_genome_wide_cooler.py: Make cooler from genome-wide predictions. Needs to be different because the predictions come out in a different format.
+2. `make_genome_wide_cooler.py`: Make cooler from genome-wide predictions.  
+Needs to be different because the predictions come out in a different format.
 
 ```
 usage: make_genome_wide_cooler.py [-h] [-d DATA_PATH] [-oe OE_PATH] [-b BIN_SIZE] [-o OUT_PATH] [--mean_oe] [--use-existing]
@@ -43,4 +44,5 @@ options:
   --use-existing        Use existing cool files
 ```
 
-3. 
+3. `cleopatra_correlations.ipynb`: calculate Pearson's correlation by distance between different coolers
+4. `cleopatra_correlations.Rmd`: plot Pearson's correlation by distance between different coolers
