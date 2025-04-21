@@ -1,2 +1,5 @@
-# cleopatra_analysis_code
-Analysis scripts and code associated with the Cleopatra model manuscript
+Cleopatra manuscript analysis code
+
+This repository contains analysis scripts and notebooks associated with the Cleopatra manuscript.  
+For the Cleopatra model code, see (link to Cleopatra repo).  
+For code associated with the loop called CHIRON, see (line to CHIRON repo).  
