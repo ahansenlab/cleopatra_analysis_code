@@ -1,0 +1,169 @@
+---
+title: "Untitled"
+output: html_document
+date: "2025-04-23"
+---
+
+```{r}
+library(corrplot)
+library(tidyverse)
+```
+
+Obtain sequences for motif comparisons 
+
+```{r}
+tmp = genome_predicted_loops_annotated |> 
+    map(~ filter(.x, loop_class == 'E-P')) |> 
+    map(~ get_anchors_from_interactions(.x))
+    # map(~ select(seqnames1, start1, end1, seqnames2, start2, end2, name))
+
+# celltypes |>
+#     map(~ write_seqs(tmp[[.x]], paste0('loop_pair_analyses/', .x, '_EP_loop_anchors.fa')))
+
+EP_anchor_coords = tmp |> 
+    map(~ as_tibble(.x)) |> 
+    map(~ rownames_to_column(.x, 'id')) |>
+    map(~ mutate(.x, id = paste0('CRE_anchor_', id))) |> 
+    map(~ select(.x, id, seqnames, start, end))
+
+celltypes |>
+    map(~ write_tsv(EP_anchor_coords[[.x]], paste0('loop_pair_analyses/', .x, '_EP_anchor_coords.tsv')))
+```
+
+```{r}
+celltypes |>
+    map(~ write_tsv(genome_predicted_loops_annotated[[.x]] |> filter(loop_class == 'E-P'),
+                    paste0('loop_pair_analyses/', .x, '_EP_loops.tsv')))
+```
+
+```{r}
+expressed_genes = RNAseq |> 
+  map(~ filter(.x, FPKM > 1))
+```
+
+```{r}
+celltypes |> 
+    map(~ write_tsv(expressed_genes[[.x]], paste0('loop_pair_analyses/', .x, '_expressed_genes.tsv')))
+```
+
+```{r}
+all_predicted_loops_unique_shared |> 
+    filter(loop_class == 'E-P') |>
+    write_tsv('loop_pair_analyses/unique_shared_EP_loops.tsv')
+```
+
+Analyses after counting motifs in get_loop_pair_counts.py
+
+```{r}
+run_chisq = function(full_df, motifs){
+    
+    tf1 = str_split(motifs, pattern = '_')[[1]][1]
+    tf2 = str_split(motifs, pattern = '_')[[1]][2]
+    
+    observed = full_df |> 
+        filter(motif1 == tf1 & motif2 == tf2) %>%
+        split(.$unique)
+    
+    if (length(observed) == 2){
+        tf1_counts = full_df |> 
+            filter(motif1 == tf1 | motif2 == tf1) |> 
+            group_by(unique) |> 
+            summarise(n = sum(count)) %>%
+            split(.$unique)
+        tf2_counts = full_df |>
+            filter(motif1 == tf2 | motif2 == tf2) |>
+            group_by(unique) |>
+            summarise(n = sum(count)) %>%
+            split(.$unique)
+    
+        chisq1 = tribble(~type, ~unique, ~shared,
+                'single', tf1_counts$unique$n[[1]], tf1_counts$shared$n[[1]],
+                'pair', observed$unique$count[[1]], observed$shared$count[[1]]) |>
+        column_to_rownames('type')
+    
+        chisq2 = tribble(~type, ~unique, ~shared,
+                'single', tf2_counts$unique$n[[1]], tf2_counts$shared$n[[1]],
+                'pair', observed$unique$count[[1]], observed$shared$count[[1]]) |>
+        column_to_rownames('type') 
+        
+        if (all(chisq1$unique > 5) & all(chisq1$shared > 5) & all(chisq2$unique > 5) & all(chisq2$shared > 5)){
+            chisq1 = tryCatch({chisq.test(chisq1)}, error = function(cond){print(motifs)})
+            chisq2 = tryCatch({chisq.test(chisq2)}, error = function(cond){print(motifs)})
+            enrichment1 = as_tibble(chisq1$stdres)$unique[2]
+            enrichment2 = as_tibble(chisq2$stdres)$unique[2]
+        
+            tribble(~motif, ~motif_pair, ~chi_p, ~enrichment,
+                    tf1, motifs, chisq1$p.value, enrichment1,
+                    tf2, motifs, chisq2$p.value, enrichment2)
+        }
+    }
+}
+```
+
+```{r}
+calculate_motif_pair_ps = function(filename){
+    counts = read_tsv(filename, show_col_types = FALSE) |> 
+        mutate(tf_pair = paste(motif1, motif2, sep = '_'))
+
+    chisq_res = unique(counts$tf_pair) |>
+        map(~ run_chisq(counts, .x)) |>
+        reduce(bind_rows)
+
+    adjusted_ps = p.adjust(chisq_res$chi_p, method = 'fdr')
+
+    chisq_res$adjusted_chi_p = adjusted_ps
+    chisq_res
+}
+```
+
+```{r}
+GM12878_motif_pair_chisq = calculate_motif_pair_ps('loop_pair_analyses/GM12878_EP_unique_motif_pair_counts.tsv') 
+HCT116_motif_pair_chisq = calculate_motif_pair_ps('loop_pair_analyses/HCT116_EP_unique_motif_pair_counts.tsv') 
+K562_motif_pair_chisq = calculate_motif_pair_ps('loop_pair_analyses/K562_EP_unique_motif_pair_counts.tsv') 
+H1_motif_pair_chisq = calculate_motif_pair_ps('loop_pair_analyses/H1_EP_unique_motif_pair_counts.tsv') 
+```
+
+```{r}
+chisq_results = list('GM12878' = GM12878_motif_pair_chisq,
+                     'HCT116' = HCT116_motif_pair_chisq,
+                     'K562' = K562_motif_pair_chisq,
+                     'H1' = H1_motif_pair_chisq)
+```
+
+```{r}
+signif_motif_pairs = set_names(celltypes) |> 
+    map(~ mutate(chisq_results[[.x]], celltype = .x)) |> 
+    reduce(bind_rows) |> 
+    filter(adjusted_chi_p < 0.05 & enrichment > 0) |> 
+    count(motif_pair, celltype) |>
+    filter(n == 2)
+```
+
+```{r}
+set_names(celltypes) |> 
+    map(~ mutate(chisq_results[[.x]], celltype = .x)) |> 
+    reduce(bind_rows) |> 
+    filter(adjusted_chi_p < 0.05 & enrichment > 0) |> 
+    count(motif_pair, celltype) |>
+    filter(n == 2) %>%
+    split(.$celltype)
+```
+
+```{r}
+pdf('figures/signif_pair_motifs.pdf')
+tmp = set_names(celltypes) |> 
+    map(~ mutate(chisq_results[[.x]], celltype = .x)) |> 
+    reduce(bind_rows) |> 
+    inner_join(signif_motif_pairs |> select(-n))  |> 
+    select(enrichment, adjusted_chi_p, motif_pair) |> 
+    mutate(motif = rep(c('motif1', 'motif2'), 21)) |> 
+    pivot_wider(id_cols = motif, names_from = motif_pair, values_from = enrichment) |> 
+    column_to_rownames('motif') |> 
+    as.matrix()
+
+corrplot(tmp, is.corr = FALSE, tl.col = 'black', cl.pos = 'r', tl.srt = 90,
+         method = 'color', outline = TRUE)
+
+dev.off()
+```
+

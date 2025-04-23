@@ -71,3 +71,22 @@ options:
                         number of parallel processes
   --fdr FDR             optional additional fdr threshold
 ```
+10: `cleopatra_loop_analyses.Rmd`: Analyses of Cleopatra loops  
+11: `cleopatra_celltype_motifs.Rmd`: Identification of cell-type-specific E-P motifs from Cleopatra loops  
+12: `get_loop_pair_counts.py`: Count of cell-type-specific E-P motifs from Cleopatra loops
+Most of the files needed in this script are generated in `cleopatra_celltype_motifs.Rmd`, except the FIMO input, which can be generated with 
+```
+fimo -oc <output_file_name> H12CORE_meme_format.meme <loop_anchors.fa>
+```
+```
+usage: get_loop_pair_counts.py [-h] celltype anchor_type
+
+Count motif pairs in loop anchors
+
+positional arguments:
+  celltype     Celltype
+  anchor_type  Type of anchor (eg. E-P)
+
+options:
+  -h, --help   show this help message and exit
+```

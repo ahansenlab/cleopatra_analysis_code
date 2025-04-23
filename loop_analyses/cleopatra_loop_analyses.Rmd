@@ -1,0 +1,793 @@
+---
+title: "Untitled"
+output: html_document
+date: "2025-04-22"
+---
+
+```{r}
+library(tidyplots)
+library(ggbeeswarm)
+library(tidyverse)
+library(AnnotationHub)
+```
+
+```{r}
+source('src.Rmd')
+```
+
+### Promoter-centric analyses
+
+Get gene annotations 
+
+```{r}
+ah = AnnotationHub()
+# ensembl transcripts that corresponds to GENCODE v29
+edb = ah[["AH64923"]]
+```
+
+```{r}
+gencode_v29_promoters = promoters(edb, upstream = 1000, downstream = 500, columns = c('gene_id', 'gene_id_version', 'gene_name'), filter = ~tx_biotype == 'protein_coding' & tx_support_level == 1)
+seqlevelsStyle(gencode_v29_promoters) = 'UCSC'
+```
+
+Read RNA_seq data (see table for encode accessions used)
+
+```{r}
+RNAseq = set_names(celltypes) |> 
+    map(~ read_tsv(paste0('../../Genome annotations/', .x, '/total_RNA_seq.tsv'), show_col_types = FALSE) |> 
+        dplyr::select(gene_id, TPM, FPKM)) |> 
+    map(~ filter(.x, grepl('ENSG', gene_id))) |> 
+    map(~ inner_join(.x, as_tibble(gencode_v29_promoters) |> select(gene_id_version, gene_name),
+                     by = c('gene_id' = 'gene_id_version'))) |> 
+    map(~ distinct(.x, gene_name, gene_id, TPM, FPKM))
+```
+
+Read Cleopatra predicted loops
+
+```{r}
+genome_predicted_all_loops = celltypes |> 
+    set_names() |> 
+    map(~ import_mustache(paste0('../example_data/loop_examples/', .x, '_genome_wide_0.001_pred_merged_loops.txt'), 2000000, dist = TRUE))
+```
+
+Find overlap between loops and promoters (independent of the loop annotations, more lenient than loop annotations)
+
+```{r}
+genome_loop_gene_expression = genome_predicted_all_loops |> 
+    map(~ find_loop_promoter_overlap(.x)) 
+
+#many-to-many because the multiple gene_ids map to the same gene name for 4 or so genes
+genome_loop_gene_expression = set_names(celltypes) |> 
+    map(~ inner_join(genome_loop_gene_expression[[.x]], RNAseq[[.x]]))
+```
+
+Get genes that have 0 loops
+
+```{r}
+genome_unlooped_genes = set_names(celltypes) |> 
+    map(~ filter(RNAseq[[.x]], !gene_name %in% genome_loop_gene_expression[[.x]]$gene_name))
+
+genome_unlooped_genes = set_names(celltypes) |> 
+    map(~ mutate(genome_unlooped_genes[[.x]], celltype = .x))
+```
+
+Count loops per promoters
+
+```{r}
+genome_loops_per_promoter = set_names(celltypes) |>
+    map(~ mutate(genome_loop_gene_expression[[.x]], celltype = .x)) |> 
+    map(~ count(.x, gene_name, celltype, TPM, FPKM))
+
+genome_loops_per_promoter = set_names(celltypes) |> 
+    map(~ bind_rows(genome_loops_per_promoter[[.x]], genome_unlooped_genes[[.x]])) |> 
+    map(~ mutate(.x, n = replace_na(n, 0)))
+```
+
+```{r}
+bind_rows(genome_loops_per_promoter |> 
+                  reduce(bind_rows)) |> 
+    filter(FPKM > 1) |>
+    mutate(expressed = 'expressed') |> 
+    bind_rows(reduce(genome_loops_per_promoter, bind_rows) |> mutate(expressed = 'all')) |>
+    mutate(celltype = factor(celltype, level = celltypes)) |> 
+    ggplot(aes(celltype, n, col = expressed)) +
+    geom_quasirandom(position = 'dodge', dodge.width = 1) +
+    plot_theme() +
+    scale_color_manual(values = c('gray', 'antiquewhite4')) +
+    xlab('') +
+    ylab('number of interactions \n per promoter')
+
+# ggsave('figures/cleo_loops_per_promoter.pdf', width = 6, height = 5)
+```
+
+Plot loop relationship to expression
+
+```{r}
+genome_loops_per_promoter |> 
+    reduce(bind_rows) |> 
+    filter(n < 21) |> 
+    mutate(celltype = factor(celltype, levels = celltypes)) |>
+    tidyplot(x = n, y = FPKM, color = celltype) |>
+    add_median_line(dodge_width = 0) |>
+    add_median_dot(size = 1, dodge_width = 0) |>
+    adjust_y_axis(limits = c(0, 24)) |> 
+    adjust_colors(new_colors = c(celltype_colours))
+
+ggsave('figures/loops_exp_increase_median_expressed.pdf')
+```
+
+Classify loops by type
+
+```{r}
+# see loop_annotations.Rmd for this function and loop annotations
+genome_predicted_loops_annotated = set_names(celltypes) |> 
+    map(~ annotate_loop_classes(genome_predicted_all_loops[[.x]], cCREs[[.x]]))
+
+# this part is literally because I didn't want to change the code from the RCMC part
+all_genome_predicted_loops = celltypes |> 
+    map(~ mutate(genome_predicted_loops_annotated[[.x]], celltype = .x)) |> 
+    reduce(bind_rows) |>
+    select(-contains('called_from')) |> 
+    left_join(pred_loops_called_from)
+
+genome_predicted_loops_annotated = all_genome_predicted_loops %>% split(.$celltype)
+```
+
+```{r}
+add_zero_loops = function(df, unlooped){
+    
+    tmp = df %>%
+        split(.$loop_class)
+    
+    names(tmp) |> 
+        map(~ bind_rows(tmp[[.x]], unlooped |> mutate(loop_class = .x))) |> 
+        reduce(bind_rows)
+}
+```
+
+```{r}
+classified_loops_per_promoter = set_names(celltypes) |> 
+    map(~ inner_join(genome_loop_gene_expression[[.x]], genome_predicted_loops_annotated[[.x]])) |> 
+    map(~ count(.x, gene_name, loop_class, TPM, FPKM))
+
+classified_loops_per_promoter = set_names(celltypes) |> 
+    map(~ mutate(classified_loops_per_promoter[[.x]], celltype = .x))
+
+classified_loops_per_promoter = set_names(celltypes) |>
+    map(~ add_zero_loops(classified_loops_per_promoter[[.x]], genome_unlooped_genes[[.x]])) |> 
+    map(~ mutate(.x, n = replace_na(n, 0)))
+```
+
+Plot expression by loop class
+The loop annotations don't match exactly (most of the promoter overlaps ARE E-P/P-P/P-other, but not all), because of the bigger promoter used at the beginning of this script than the P annotations in SCREEN
+But if it's CTCF-CTCF/CTCF-other/other-other, at least one has to be a P, so I classified it as P-other
+If it's an E-E, at least one as to be a P, so I classified it as E-P
+
+```{r}
+classified_loops_per_promoter |> 
+    reduce(bind_rows) |> 
+    filter(n < 8) |>
+    mutate(loop_class = case_when(
+        grepl('CTCF|other', loop_class) ~ 'P-other',
+        grepl('E-E', loop_class) ~ 'E-P',
+        TRUE ~ loop_class
+    )) |> 
+    mutate(n = as.factor(n), loop_class = factor(loop_class, levels = c('E-P', 'P-P', 'P-other')),
+    celltype = factor(celltype, celltypes)) |>
+    tidyplot(x = n, y = FPKM, color = loop_class) |>
+    add_median_line(dodge_width=0) |>
+    add_median_dot(size = 0.5, dodge_width=0) |>
+    adjust_colors(new_colors = c('dodgerblue3', 'dodgerblue4', '#8C9CB1')) |>
+    split_plot(celltype, nrow = 1) 
+
+ggsave('figures/classified_loops_exp_increase_median.pdf')
+```
+
+### Enhancer-centric analyses
+
+Count promoters per enhancer
+
+```{r}
+count_promoters_per_enhancer = function(enhancers, loops, celltype){
+    
+    loops_gi = make_ginteractions_from_df(loops, extra_cols = c('name', 'loop_class'))
+    
+    looped_enhancers = findOverlaps(enhancers, loops_gi)
+    
+    as_tibble(enhancers[queryHits(looped_enhancers)]) |> 
+        select(-width, -strand) |> 
+        rename(enhancer_id = name) |>
+        bind_cols(loops_gi[subjectHits(looped_enhancers)] |> as_tibble() |> select(anchor1.name, anchor1.loop_class)) |> 
+        mutate(celltype = celltype)
+}
+```
+
+```{r}
+# see how to get enhancers from loop_annotations.Rmd
+celltypes |> 
+    map(~ count_promoters_per_enhancer(cCREs[[.x]]$enhancer, genome_predicted_loops_annotated[[.x]], .x)) |> 
+    reduce(bind_rows) |> 
+    filter(grepl('E-P', anchor1.loop_class)) |>
+    count(celltype, enhancer_id) |>
+    mutate(celltype = factor(celltype, levels = celltypes)) |> 
+    ggplot(aes(celltype, n, color = celltype)) +
+    geom_quasirandom() +
+    plot_theme() +
+    scale_color_manual(values = celltype_colours) +
+    xlab('') +
+    ylab('number of E-P loops \n per enhancer') +
+    theme(legend.position = 'None')
+
+ggsave('figures/number_EP_loops_per_enhancer.pdf', width = 6, height = 5)
+```
+
+Identifying enhancers that skip the closest promoter
+
+```{r}
+count_nearest = function(df){
+    filtered_up = filter(df, nearest_gene_up == gene_name)
+    filtered_down = filter(df, nearest_gene_down == gene_name)
+    if (nrow(filtered_up) >= 1){
+        distinct(filtered_up) |> mutate(skip_nearest = FALSE)
+    }
+    else if (nrow(filtered_down) >= 1){
+        distinct(filtered_down) |> mutate(skip_nearest = FALSE)
+    } else{
+        new_df = mutate(df, loop_distance = start.y - start.x)  |> 
+            mutate(up_down_loop = case_when(
+                loop_distance > 0 ~ 'upstream',
+                loop_distance < 0 ~ 'downstream'
+            ))
+        
+        upstream_df = filter(new_df, up_down_loop == 'upstream')
+        downstream_df = filter(new_df, up_down_loop == 'downstream')
+        
+        upstream = FALSE
+        downstream = FALSE
+        
+        if (nrow(upstream_df) >= 1){
+            upstream_final = 
+                distinct(upstream_df, enhancer_id, seqnames.x, start.x, end.x, nearest_gene_up, gene_name) |> 
+                mutate(skip_nearest = TRUE) |> 
+                rename(nearest_gene = nearest_gene_up, further_gene = gene_name)
+             upstream = TRUE 
+             }
+        
+        if (nrow(downstream_df) >= 1){
+            downstream_final = 
+                distinct(downstream_df, enhancer_id, seqnames.x, start.x, end.x, nearest_gene_down, gene_name) |> 
+                mutate(skip_nearest = TRUE) |> 
+                rename(nearest_gene = nearest_gene_down, further_gene = gene_name)
+            downstream = TRUE
+        }
+        
+        if (upstream == TRUE & downstream == TRUE){
+            bind_rows(upstream_final, downstream_final)}
+        else if (upstream == TRUE){
+            return (upstream_final)
+        } else if (downstream == TRUE){
+            return (downstream_final)
+        }
+    }
+}
+```
+
+```{r}
+find_nearest_promoter = function(enhancers, loops, promoter_loop){
+    looped_enhancers = findOverlaps(enhancers, loops)
+    
+    nearest_prom_up = precede(enhancers[queryHits(looped_enhancers)], gencode_v29_promoters)
+    nearest_prom_down = follow(enhancers[queryHits(looped_enhancers)], gencode_v29_promoters)
+    
+    as_tibble(enhancers[queryHits(looped_enhancers)]) |> 
+        select(-width, -strand) |> 
+        rename(enhancer_id = name) |> 
+        bind_cols(loops[subjectHits(looped_enhancers)] |> as_tibble() |> select(name)) |> 
+        bind_cols(gencode_v29_promoters[nearest_prom_up] |> as_tibble() |> select(gene_name) |> rename(nearest_gene_up = gene_name)) |> 
+        bind_cols(gencode_v29_promoters[nearest_prom_down] |> as_tibble() |> select(gene_name) |> rename(nearest_gene_down = gene_name)) |> 
+        inner_join(promoter_loop |> select(gene_name, gene_id, TPM, FPKM, name)) |> 
+        inner_join(as_tibble(gencode_v29_promoters) |> select(gene_name, seqnames, start, end),
+                   by = c('gene_name')) %>%
+        split(.$enhancer_id) |>
+        map(~ count_nearest(.x)) |>
+        reduce(bind_rows)
+}
+```
+
+```{r}
+nearest_promoter_info = set_names(celltypes) |>
+    map(~ find_nearest_promoter(cCREs[[.x]]$enhancer, genome_predicted_all_loops[[.x]], genome_loop_gene_expression[[.x]]))
+```
+
+```{r}
+count_enhancer_skip_fraction = function(enhancer_skip, celltype){
+    genes = as_tibble(gencode_v29_promoters) |> mutate(gene_start = start, gene_end = end) |>
+            select(gene_start, gene_end, gene_name)
+    
+    df = enhancer_skip |>
+        inner_join(genes, by = c('nearest_gene' = 'gene_name')) |>
+        mutate(distance = abs(start.x - gene_start)) |>
+        filter(distance > 5000 & distance < 198000) |>
+        bind_rows(enhancer_skip |> filter(skip_nearest == FALSE)) |> 
+        distinct(enhancer_id, skip_nearest) |>
+        count(skip_nearest)
+    
+    # Calculate the total sum of all numeric columns
+    total <- sum(sapply(df[sapply(df, is.numeric)], sum), na.rm = TRUE)
+
+    # Convert numeric columns to fractions
+    df_fractions <- df %>%
+        mutate(across(where(is.numeric), ~./total)) |>
+        mutate(frac = paste0(signif(100 * n, 2), "%")) |>
+        mutate(celltype = celltype)
+
+    return(df_fractions)
+}
+```
+
+```{r}
+set_names(celltypes) |> 
+    map(~ count_enhancer_skip_fraction(nearest_promoter_info[[.x]], .x)) |> 
+    reduce(bind_rows) |> 
+    mutate(skip_nearest = factor(skip_nearest, levels = c(TRUE, FALSE)),
+    celltype = factor(celltype, celltypes)) |>
+    ggplot(aes(x = '', y = n, fill = skip_nearest)) +
+    geom_col() +
+    coord_polar(theta = 'y') +
+    theme_void(base_family = 'Helvetica', base_size = 10) +
+    theme(legend.position = 'bottom') +
+    guides(fill = guide_legend(nrow = 1)) +
+    facet_wrap(~ celltype, nrow = 1) +
+    scale_fill_manual(values = c('skyblue4', 'gray')) +
+    geom_text(aes(label = frac, x = 1.15), position = position_stack(vjust = 0.5), size = 3.5, col = 'black')
+
+ggsave('figures/enhancers_skip_gene_proportion.pdf', width = 7, height = 4)
+```
+
+Find expression of skipped genes and compare
+
+```{r}
+select_closest_looped_gene = function(df){
+    if (nrow(df) > 1){
+        genes = as_tibble(gencode_v29_promoters) |> mutate(gene_start = start, gene_end = end) |>
+            select(gene_start, gene_end, gene_name)
+        inner_join(df, genes, by = c('further_gene' = 'gene_name')) |> 
+            rename(further_gene_start = gene_start) |> 
+            inner_join(genes, by = c('nearest_gene' = 'gene_name')) |> 
+            mutate(distance_to_further_gene = abs(further_gene_start - start.x),
+                   distance_to_nearest_gene = abs(gene_start - start.x)) |> 
+            filter(distance_to_nearest_gene > 5000 & distance_to_nearest_gene < 198000) |>
+            arrange(distance_to_further_gene) |> 
+            slice(1)
+    } else (
+        return (df)
+    )
+}
+```
+
+```{r}
+compare_looped_skipped_genes = function(nearest_promoter, RNAseq, celltype){
+    nearest_promoter |> 
+        filter(skip_nearest == TRUE) |> 
+        distinct(enhancer_id, nearest_gene, further_gene, start.x) %>%
+        split(.$enhancer_id) |>
+        map(~ select_closest_looped_gene(.x)) |>
+        reduce(bind_rows)
+}
+```
+
+```{r}
+skipped_genes = set_names(celltypes) |>
+    map(~ compare_looped_skipped_genes(nearest_promoter_info[[.x]], RNAseq[[.x]], .x)) 
+```
+
+```{r}
+get_skipped_genes_exp = function(skipped_genes, RNAseq, celltype){
+        inner_join(skipped_genes, RNAseq, by = c('nearest_gene' = 'gene_name')) |>
+        rename(skipped_TPM = TPM, skipped_FPKM = FPKM) |>
+        inner_join(RNAseq, by = c('further_gene' = 'gene_name')) |>
+        rename(looped_TPM = TPM, looped_FPKM = FPKM) |>
+        select(enhancer_id, nearest_gene, further_gene, contains('FPKM'), contains('TPM')) |> 
+        mutate(celltype = celltype) 
+}
+```
+
+```{r}
+skipped_genes_exp = set_names(celltypes) |> 
+    map(~ get_skipped_genes_exp(skipped_genes[[.x]], RNAseq[[.x]], .x))
+```
+
+```{r}
+reduce(skipped_genes_exp, bind_rows) |>
+    pivot_longer(cols = contains('FPKM'), names_to = 'skipped', values_to = 'FPKM') |>
+    mutate(silenced = case_when(
+        FPKM > 1 ~ 'expressed',
+        TRUE ~ 'silenced'
+    )) |> 
+    grouped_ggbarstats(silenced, skipped, grouping.var = celltype,
+               results.subtitle = FALSE,
+             label.args = list(alpha = 0.7, fill = "white",
+                                         size = 4),
+             plotgrid.args = list(nrow = 1),
+            sample.size.label.args = list(size = 3,
+                                         y = 1.015,
+                                         vjust = -0.5),
+        ggplot.component = list(scale_fill_manual(values = c('gray', 'darkseagreen4')),
+                                plot_theme(),
+                                theme(text = element_text(size = 10)),
+                                scale_y_continuous(expand = expansion(mult = c(0, 0.05)))
+                                )) +
+    xlab('')
+
+ggsave('figures/skipped_genes_silenced_proportion.pdf', width = 8.2, height = 4)
+```
+
+```{r}
+celltypes |> 
+    map(function(x){
+    reduce(skipped_genes_exp, bind_rows) |> 
+    filter(celltype == x) |>
+    ggplot(aes(log2(skipped_FPKM + 0.01), log2(looped_FPKM + 0.01))) +
+    ggpointdensity::geom_pointdensity() +
+    geom_abline(intercept = 0, slope = 1) +
+    scale_color_viridis_c() +
+    plot_theme() +
+    theme(legend.position = 'None')
+        
+    ggsave(paste0('figures/', x, '_skipped_gene_expression.pdf'), width = 4, height = 4)
+    }
+)
+```
+
+### CTCF faciliator analyses
+
+Determine what threshold for E/P distance to CTCF peak to use 
+
+```{r}
+annotate_distance_to_CTCF = function(loops, CTCF, shift = FALSE){
+    
+    anch1_gr = loops |> 
+        filter(loop_class == 'E-P') |> 
+        makeGRangesFromDataFrame(seqnames.field = 'seqnames1',
+                                 start.field = 'start1',
+                                 end.field = 'end1', 
+                                 keep.extra.columns = TRUE)
+    
+    anch2_gr = loops |> 
+        filter(loop_class == 'E-P') |> 
+        makeGRangesFromDataFrame(seqnames.field = 'seqnames2',
+                                 start.field = 'start2',
+                                 end.field = 'end2', 
+                                 keep.extra.columns = TRUE)
+    if (shift == TRUE){
+        anch1_gr = shift(anch1_gr, 20000)
+        anch2_gr = shift(anch2_gr, 20000)}
+    
+    anch1_dist = as_tibble(anch1_gr) |> bind_cols(mcols(distanceToNearest(anch1_gr, CTCF))$distance) |> 
+        rename(anch1_distance = ...15) 
+    anch2_dist = as_tibble(anch2_gr) |> bind_cols(mcols(distanceToNearest(anch2_gr, CTCF))$distance) |> 
+        rename(anch2_distance = ...15) 
+    
+    inner_join(anch1_dist, anch2_dist, by = c('name', 'celltype', 'selected_anch1', 'selected_anch2')) |> 
+        # rename(anch1_anno = anno.x, anch2_anno = anno.y) #|>
+        select(-contains('.')) |>
+        mutate(sum_distance = anch1_distance + anch2_distance)
+}
+```
+
+```{r}
+get_frac_by_distance = function(df){
+    
+    out_df = tribble(~ctcf_distance, ~frac)
+    
+    for (distance in c(0, 1000, 5000, 10000, 20000, 30000)){
+        n_distance = df |> 
+            filter(anch1_distance <= distance | anch2_distance <= distance) |> 
+            nrow()
+        
+        frac = n_distance/nrow(df)
+        current_df = tribble(~ctcf_distance, ~frac,
+                             distance, frac)
+        out_df = bind_rows(out_df, current_df) 
+    }
+    
+    out_df |> mutate(celltype = df$celltype[[1]])
+    
+}
+```
+
+```{r}
+# get the 'negative' set of non-EP loops
+tmp = celltypes |> 
+    map(~ annotate_distance_to_CTCF(genome_predicted_loops_annotated[[.x]], CTCF_ChIP[[.x]], shift = TRUE)) |> 
+    map(~ get_frac_by_distance(.x)) |> 
+    reduce(bind_rows) |> 
+    mutate(real_loop = 'negative set')
+
+celltypes |> 
+    map(~ annotate_distance_to_CTCF(genome_predicted_loops_annotated[[.x]], CTCF_ChIP[[.x]], shift = FALSE)) |> 
+    map(~ get_frac_by_distance(.x)) |> 
+    reduce(bind_rows) |>
+    mutate(real_loop = 'true loops') |>
+    bind_rows(tmp) |> 
+    mutate(ctcf_distance = as.factor(ctcf_distance),
+           celltype = factor(celltype, celltypes)
+    ) |> 
+    mutate(id = paste0(celltype, real_loop)) |> 
+    tidyplot(ctcf_distance, frac, color = celltype) |> 
+    add_line(group = id) |>
+    add_data_points(data = filter_rows(real_loop == 'true loops'), dodge_width = 0) |> 
+    add_data_points(data = filter_rows(real_loop == 'negative set'), dodge_width = 0, shape = 17) |>
+    adjust_x_axis_title('anchor distance to closest CTCF site') |> 
+    adjust_y_axis_title('fraction of loops with CTCF sites') |> 
+    adjust_colors(new_colors = celltype_colours) 
+
+ggsave('figures/ctcf_overlap_by_distance.pdf')
+```
+
+Find number of E-P pairs with CTCF peaks
+
+```{r}
+annotate_ctcf_on_ep = function(loops, CREs, CTCF, celltype, extend=FALSE){
+    
+    all_anno = c('enhancer', 'promoter') |>
+        map(~annotate_CREs(loops, CREs[[.x]], .x, extend=extend)) 
+    
+    ctcf_anno = annotate_CREs(loops, CTCF, 'CTCF', extend=9000)
+    
+    all_anno$CTCF = ctcf_anno
+    
+    reduce(all_anno, full_join, by = c('seqnames1', 'start1', 'end1', 'seqnames2', 'start2', 'end2', 'name')) |>
+    full_join(as_tibble(loops) |>
+                  dplyr::select('seqnames1', 'start1', 'end1', 'seqnames2', 'start2', 'end2', 'name')) |>
+    mutate(selected_anch1 = case_when(
+        anch1_anno.y == 'promoter' ~ 'promoter',
+        anch1_anno.x == 'enhancer' ~ 'enhancer',
+        TRUE ~ 'NA'
+    ), selected_anch2 = case_when(
+        anch2_anno.y == 'promoter' ~ 'promoter',
+        anch2_anno.x == 'enhancer' ~ 'enhancer',
+        TRUE ~ 'NA'
+    )) |>
+    mutate(EP = case_when(
+        selected_anch1 == 'enhancer' & selected_anch2 == 'promoter' ~ 'E-P',
+        selected_anch1 == 'promoter' & selected_anch2 == 'enhancer' ~ 'E-P',
+        selected_anch1 == 'promoter' & selected_anch2 == 'promoter' ~ 'P-P',
+        selected_anch1 == 'enhancer' & selected_anch2 == 'enhancer' ~ 'E-E',
+        selected_anch1 == 'promoter' | selected_anch2 == 'promoter' ~ 'P-other',
+        selected_anch1 == 'enhancer' | selected_anch2 == 'enhancer' ~ 'E-other',
+        TRUE ~ 'other-other'
+    )) |>
+    mutate(CTCF_EP = case_when(
+        grepl('E-P', EP) & anch1_anno == 'CTCF' & anch2_anno == 'CTCF' ~ 'both',
+        grepl('E-P', EP) & anch1_anno == 'CTCF' & selected_anch1 == 'promoter' ~ 'P',
+        grepl('E-P', EP) & anch2_anno == 'CTCF' & selected_anch2 == 'promoter' ~ 'P',
+        grepl('E-P', EP) & anch1_anno == 'CTCF' & selected_anch1 == 'enhancer' ~ 'E',
+        grepl('E-P', EP) & anch2_anno == 'CTCF' & selected_anch2 == 'enhancer' ~ 'E',
+        grepl('E-P', EP) ~ 'none'
+    )) |>
+    select(-contains('anno')) |> 
+    mutate(celltype = celltype)
+}
+```
+
+```{r}
+annotate_ctcf_on_ep_by_distance = function(df, distance){
+    df |> 
+        mutate(CTCF_EP = case_when(
+            anch1_distance < distance & anch2_distance < distance ~ 'both',
+            anch1_distance < distance ~ selected_anch1,
+            anch2_distance < distance ~ selected_anch2,
+            TRUE ~ 'none'
+        )) 
+}
+```
+
+```{r}
+count_ctcf_fraction = function(ctcf_loops){
+    
+    df = ctcf_loops |> 
+        count(CTCF_EP, celltype)
+    
+    # Calculate the total sum of all numeric columns
+    total <- sum(sapply(df[sapply(df, is.numeric)], sum), na.rm = TRUE)
+    
+    # Convert numeric columns to fractions
+    df_fractions <- df %>%
+        mutate(across(where(is.numeric), ~./total)) |> 
+        mutate(frac = paste0(signif(100 * n, 2), "%"))
+    
+    return(df_fractions)
+}
+```
+
+```{r}
+celltypes |> 
+    map(~ annotate_distance_to_CTCF(genome_predicted_loops_annotated[[.x]], CTCF_ChIP[[.x]])) |> 
+    map(~ annotate_ctcf_on_ep_by_distance(.x, 5000)) |> 
+    map(~ count_ctcf_fraction(.x)) |> 
+    reduce(bind_rows) |> 
+    mutate(CTCF_EP = factor(CTCF_EP, levels = c('both', 'promoter', 'enhancer', 'none')),
+           celltype = factor(celltype, levels = celltypes)) |> 
+    filter(celltype != 'GM12878') |> 
+    ggplot(aes(x = '', y = n, fill = CTCF_EP)) +
+    geom_col() +
+    coord_polar(theta = "y") +
+    theme_void(base_family = 'Helvetica', base_size = 10) +
+    theme(legend.position = 'None') +
+    guides(fill = guide_legend(nrow = 1)) +
+    facet_wrap(~ celltype, nrow = 1) +
+    scale_fill_manual(values = c("#CC3311","dodgerblue4","skyblue4","gray")) +
+    geom_text(aes(label = frac, x = 1.1), position = position_stack(vjust = 0.5), size = 3, col = 'black')
+
+ ggsave('figures/CTCF_EP_facilitator_others_pie.pdf', width = 6, height = 2)
+```
+
+```{r}
+celltypes |> 
+    map(~ annotate_distance_to_CTCF(genome_predicted_loops_annotated[[.x]], CTCF_ChIP[[.x]])) |> 
+    map(~ annotate_ctcf_on_ep_by_distance(.x, 5000)) |> 
+    reduce(bind_rows) |> 
+    mutate(loop_distance = abs(start2 - start1)) |> 
+    mutate(distance_bin = case_when(
+        loop_distance < 50000 ~ '<50kb',
+        loop_distance < 100000 ~ '<100kb',
+        loop_distance < 300000 ~ '<300kb',
+        loop_distance < 500000 ~ '<500kb',
+        TRUE ~ '>=500kb')
+    ) |> 
+    mutate(distance_bin = factor(distance_bin, c('<50kb', '<100kb', '<300kb', '<500kb', '>=500kb')),
+           CTCF_EP = factor(CTCF_EP, levels = c('none', 'enhancer', 'promoter', 'both')),
+           celltype = factor(celltype, levels = celltypes)) |> 
+    tidyplot(x = distance_bin, color = CTCF_EP) |> 
+    add_areastack_relative(alpha = 0.9) |> 
+    adjust_colors(new_colors = rev(c("#CC3311","dodgerblue4","skyblue4","gray"))) |> 
+    split_plot(celltype, nrow = 1) 
+
+ggsave('figures/ctcf_overlap_by_distance_areaplot.pdf')
+```
+
+Plot CTCF facilitated loops by unique/cell-type-specific loops
+
+```{r}
+tmp = celltypes |> 
+    map(~ annotate_ctcf_on_ep(genome_predicted_all_loops[[.x]], cCREs[[.x]], CTCF_ChIP[[.x]], .x)) |> 
+    reduce(bind_rows) |> 
+    inner_join(all_predicted_loops_unique_shared |> select(celltype, name, unique)) |> 
+    filter(EP == 'E-P') |> 
+    mutate(distance = abs(start2 - start1)) |>
+    mutate(CTCF_EP = factor(CTCF_EP, levels = c('both', 'P', 'E', 'none')),
+           celltype = factor(celltype, levels = celltypes)) |> 
+    grouped_ggbarstats(CTCF_EP, unique,
+                       grouping.var = celltype,
+                       plotgrid.args = list(nrow = 1),
+                       results.subtitle = FALSE,
+                       label.args = list(alpha = 0, fill = "NA", size = 0),
+                       sample.size.label.args = list(size = 2.3, y = 1.015, vjust = -0.5),
+                       ggplot.component = list(
+                           scale_fill_manual(values = rev(c("#CC3311","dodgerblue4","skyblue4","gray"))),
+                           plot_theme(), theme(text = element_text(size = 10)),
+                           scale_y_continuous(expand = expansion(mult = c(0, 0.05)))
+                        ), xlab = '')
+
+ggsave('figures/ctcf_facilitator_by_unique_shared.pdf', width = 6.5, height = 5)
+```
+
+### Housekeeping genes analysis
+
+```{r}
+# housekeeping genes from Eisenberg & Levanon
+hk_genes = read_tsv('../../Other_papers_data/HK_genes.txt', col_names = c('gene_name', 'Refseq')) |>
+    mutate(hk_dev = 'hk')
+```
+
+Count and plot number of loops per hk/dev gene
+
+```{r}
+tmp = genome_loops_per_promoter |> 
+    reduce(bind_rows) |>
+    filter(FPKM > 1) |> 
+    left_join(hk_genes) |>
+    mutate(hk_dev = replace_na(hk_dev, 'dev'),
+           celltype = factor(celltype, celltypes)) 
+    
+filter(tmp, hk_dev == 'hk') |>
+    ggplot(aes(celltype, n)) +
+    geom_half_violin(fill = 'lightpink4', col = NA, scale = 'width') +
+    geom_half_boxplot(width = 0.1, outliers = FALSE, fill = 'white', errorbar.draw = FALSE) +
+    geom_half_violin(data = tmp |> filter(hk_dev == 'dev'), mapping = aes(celltype, n),
+                     side = 'r', fill = 'paleturquoise4', col = NA, scale = 'width') +
+    geom_half_boxplot(data = tmp |> filter(hk_dev == 'dev'), mapping = aes(celltype, n), 
+                      width = 0.1, side = 'r', outliers = FALSE, fill = 'white', errorbar.draw = FALSE) +
+    plot_theme() +
+    ylab('number of loops') +
+    xlab('')
+
+ggsave('figures/hk_dev_n_loops.pdf', width = 6, height = 4)
+```
+
+Count and plot number of EP loops per hk/dev gene
+
+```{r}
+ep_loops_per_promoter = set_names(celltypes) |> 
+    map(~ inner_join(genome_loop_gene_expression[[.x]], genome_predicted_loops_annotated[[.x]])) |> 
+    map(~ count(.x, gene_name, loop_class, TPM, FPKM)) |> 
+    map(~ filter(.x, grepl('E-P', loop_class)))
+
+ep_loops_per_promoter = set_names(celltypes) |> 
+    map(~ mutate(ep_loops_per_promoter[[.x]], celltype = .x))
+
+ep_loops_per_promoter = set_names(celltypes) |> 
+    map(~ bind_rows(ep_loops_per_promoter[[.x]], genome_unlooped_genes[[.x]])) |> 
+    map(~ mutate(.x, n = replace_na(n, 0)))
+```
+
+```{r}
+tmp = ep_loops_per_promoter |> 
+    reduce(bind_rows) |>
+    filter(FPKM > 1) |> 
+    left_join(hk_genes) |>
+    mutate(hk_dev = replace_na(hk_dev, 'dev'), celltype = factor(celltype, celltypes)) 
+
+filter(tmp, hk_dev == 'hk') |>
+    ggplot(aes(celltype, n)) +
+    # geom_violin(scale = 'width') +
+    # geom_boxplot(width = 0.1, position = position_dodge(width = 0.9))
+    geom_half_violin(fill = 'lightpink4', col = NA, scale = 'width', adjust = 3) +
+    geom_half_boxplot(width = 0.1, outliers = FALSE, fill = 'white', errorbar.draw = FALSE) +
+    geom_half_violin(data = tmp |> filter(hk_dev == 'dev'), mapping = aes(celltype, n),
+                     side = 'r', fill = 'paleturquoise4', col = NA, scale = 'width', adjust = 3) +
+    geom_half_boxplot(data = tmp |> filter(hk_dev == 'dev'), mapping = aes(celltype, n), 
+                      width = 0.1, side = 'r', outliers = FALSE, fill = 'white', errorbar.draw = FALSE) +
+    plot_theme() +
+    ylab('number of E-P loops') +
+    xlab('')
+
+ggsave('figures/hk_dev_n_ep_loops.pdf', width = 6, height = 4)
+```
+
+```{r}
+set_names(celltypes) |> 
+    map(~ mutate(genome_loop_gene_expression[[.x]], celltype = .x)) |> 
+    reduce(bind_rows) |> 
+    inner_join(reduce(genome_predicted_loops_annotated, bind_rows) |> select(celltype, loop_class, name)) |> 
+    filter(FPKM > 1 & loop_class == 'E-P') |> 
+    left_join(hk_genes) |>
+    mutate(hk_dev = replace_na(hk_dev, 'dev'),
+           distance = abs(start2-start1),
+           celltype = factor(celltype, celltypes)) |> 
+    distinct(gene_name, hk_dev, distance, celltype) |> 
+    ggplot(aes(log10(distance), col = hk_dev, fill = hk_dev)) +
+    geom_density(adjust = 3, alpha = 0.6) +
+    facet_wrap(~celltype) +
+    plot_theme_facet() +
+    scale_color_manual(values = c('paleturquoise4', 'lightpink4')) + 
+    scale_fill_manual(values = c('paleturquoise4', 'lightpink4')) +
+    scale_y_continuous(expand = c(0,0), limits = c(0, 0.8)) +
+    theme(legend.position = 'None')
+
+ggsave('figures/hkdev_ep_distance.pdf', width = 6, height = 6)
+```
+
+```{r}
+set_names(celltypes) |>
+    map(~ mutate(genome_loop_gene_expression[[.x]], celltype = .x)) |> 
+    reduce(bind_rows) |> 
+    left_join(all_predicted_loops_unique_shared) |> 
+    left_join(hk_genes) |> 
+    mutate(hk_dev = replace_na(hk_dev, 'dev')) |>  
+    count(gene_name, celltype, hk_dev, unique) |> 
+    grouped_ggbarstats(unique, hk_dev, 
+               grouping.var = celltype,
+               plotgrid.args = list(nrow = 1),
+                       results.subtitle = FALSE,
+                       label.args = list(alpha = 0.3, fill = 'white', size = 3),
+                       sample.size.label.args = list(size = 2.3, y = 1.015, vjust = -0.5),
+                       ggplot.component = list(
+                           scale_fill_manual(values = c('bisque2','#e49029')),
+                           plot_theme(), theme(text = element_text(size = 10)),
+                           scale_y_continuous(expand = expansion(mult = c(0, 0.05)))
+                        ), xlab = '')
+
+ggsave('figures/hk_dev_unique_shared.pdf')
+```
