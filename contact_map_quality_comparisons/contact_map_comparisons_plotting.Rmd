@@ -115,5 +115,31 @@ read_tsv('comparisons_by_distance/RCMC_regions_all_fraction_filled_by_distance.t
     scale_fill_manual(values = c('#23344d', '#136f63', '#C64191', '#dd8c22')) +
     theme(legend.position = 'None')
 
-ggsave('rcmc_microc_fraction_filled_by_distance.pdf', width = 9, height = 6)
+ggsave('rcmc_microc_fraction_filled_by_distance.pdf', width = 6, height = 6)
+```
+
+### Plot reads by distance
+
+```{r}
+read_tsv('comparisons_by_distance/RCMC_regions_all_avg_reads_by_distance.tsv', show_col_types = FALSE) |> 
+    mutate(experiment = 'RCMC') |> 
+    bind_rows(read_tsv('comparisons_by_distance/microc_regions_all_avg_reads_by_distance.tsv', show_col_types = FALSE) |> 
+              mutate(experiment = 'Micro-C')) |> 
+    bind_rows(read_tsv('comparisons_by_distance/harris_hic_all_avg_reads_by_distance.tsv', show_col_types = FALSE) |> 
+              mutate(experiment = 'Hi-C')) |> 
+    mutate(experiment = factor(experiment, levels = c('RCMC', 'Micro-C', 'Hi-C')),
+           clr = factor(clr, levels = celltypes)) |> 
+    ggplot(aes(distance, avg_reads, shape = experiment, fill = clr, col = clr)) +
+    geom_line(lty = 3) +
+    geom_point(alpha = 1, col = 'NA', size = 4) +
+    scale_x_log10(guide = "axis_logticks", labels = scales::label_log()) +
+    scale_y_log10(guide = "axis_logticks", labels = scales::label_log()) +
+    ylab('Average #reads per bin') +
+    plot_theme() +
+    scale_shape_manual(values = c(21, 23, 22)) +
+    scale_color_manual(values = c('#23344d', '#136f63', '#C64191', '#dd8c22')) +
+    scale_fill_manual(values = c('#23344d', '#136f63', '#C64191', '#dd8c22')) +
+    theme(legend.position = 'None')
+    
+ggsave('figures/rcmc_microc_reads_by_distance.pdf', width = 6, height = 6)
 ```

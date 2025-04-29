@@ -16,4 +16,4 @@ options:
 ```
 
 3. `contact_map_comparisons.ipynb`: Calculate P(s) and fraction of bins filled
-4. `contact_map_comparisons_plotting.Rmd`: Plot figures
+4. `contact_map_comparisons_plotting.Rmd`: Plot figures. All figure plotting depends on a modified version of [plotgardener](https://phanstiellab.github.io/plotgardener/), which can be found at [this](https://github.com/claricehong/plotlandscaper) GitHub repository. 
