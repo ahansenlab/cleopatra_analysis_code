@@ -4,7 +4,7 @@ This repository contains analysis scripts and notebooks associated with the Cleo
 For the Cleopatra model code, see the [Cleopatra](https://github.com/liu-bioinfo-lab/Cleopatra/) repository.  
 For code associated with the loop caller CHIRON, see the [CHIRON](https://github.com/ahansenlab/chiron) repository.  
 
-The repository is divided into folders corresponding to different sections of the manuscript. A more detailed README can be found in each folder.   
+The repository is divided into folders corresponding to different sections of the manuscript. A more detailed README can be found in each folder. Example data and RCMC loops can be found in the **useful_data** folder to run the analyses in the various folders. 
 
 1. **microc_pipeline**: Scripts for aligning Micro-C data
 2. **rcmc_pipeline**: Scripts for aligning RCMC data
